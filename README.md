@@ -6,7 +6,9 @@ It goes without saying that this project is funded 100% out of my own pocket, an
 
 Now you can check out the simulation for yourself. It's still in its early form, so expect bugs (which I am happy to hear about).
 
-**[▶ Open Weather3D](https://mesochaser2425.github.io/weather3d/)** – here you can open the simulation in your browser.
+**[▶ Open Weather3D](https://weatherin2d.github.io/weather3doptimised/)** – here you can open the simulation in your browser.
+
+(Original upstream demo: [mesochaser2425.github.io/weather3d](https://mesochaser2425.github.io/weather3d/).)
 
 You need a current Chrome or Edge on a computer with a WebGPU graphics card; it will not work on phones. All the computing happens on your PC, so the simulation speed will depend on your card. On my RTX 5060 Ti, a simulated day on a 500 × 500 km map takes about 20 s at maximum speed. Starting takes a minute or so.
 
