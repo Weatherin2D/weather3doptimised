@@ -437,7 +437,8 @@ export class PEModel {
     // Klimat podłoża w każdym oczku (miejsce z mapy świata): normy miesięczne z climbase.js (stacje GHCN_CAMS, GPCC) – głębsza gleba, śnieg, albedo, morza zamknięte.
     // Wcześniej szerokość + kontynentalizm, poprawka i wilgotność miejsca domeny na całym kole szerokości: Rosja i Syberia z amplitudą roczną jak Polska (zimą głębsza
     // gleba i brak śniegu – wnętrze kontynentu +6…+8 K), Sahara z albedo pól. ?plc=0 – dawny klimat z szerokości (porównania A/B)
-    if (this.geo && QP.get('plc') !== '0' && !this.lc) {
+    // Custom world builder: skip station-based land climate (maps carry soil/SST/sea themselves)
+    if (this.geo && QP.get('plc') !== '0' && !this.lc && !this.geo.custom) {
       const Ts = new Float32Array(12 * N2), ha = new Float32Array(N2), ta = new Float32Array(N2);
       const MD = [31, 28.25, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
       for (let j = 0; j < NYP; j++) {
@@ -517,22 +518,26 @@ export class PEModel {
       for (let i = 0; i < NXP; i++) {
         const c = j * NXP + i, s = this.sea[c];
         v[off.SEA + c] = s;
+        const lo = lonAt(la, i);
         const tLandC = lc ? lcAt(c, doy) + 273.15 : tLand;
         const tDeepC = lc ? lc.ta[c] + 0.5 * (lcAt(c, doy - 45) - lc.ta[c]) + 273.15 : tDeep;
         const tLag0C = lc ? lcAt(c, doy - 25) + 273.15 : tLag0, tLagC = Math.max(tLag0C, 271.35);
+        // custom world: SST from painted/preset map when available
+        const tSeaC = (s && this.geo && this.geo.sstAt ? this.geo.sstAt(la, lo, doy) + 273.15 : tSea);
         // lód morski (TS < 271.5 – powierzchnia z bilansem energii jak ląd, albedo 0.55, mało pary): ocean za granicą lodu dla tej
         // długości i pory roku; morza zamknięte (Zatoka Botnicka, Fińska, Morze Białe, północny Kaspij), gdy ląd wokół (z opóźnieniem
         // ~25 dób) ma < −4 °C – Bałtyk środkowy i południowy zostaje otwarty
         const ice = s && (Math.abs(la) >= iceEdge(lonOf ? lonOf(la, i) : null, la, doy) || (this.encl[c] >= 0.4 && tLag0C < 269.15));
         // ląd w górach: klimat z poziomu morza sprowadzony gradientem 6.5 K/km (podłoże, głębsza gleba, śnieg)
         const dTh = 0.0065 * this.hgt[c];
-        v[off.TS + c] = s ? (ice ? 271.15 : tSea + 0.75 * this.encl[c] * (tLagC - tSea)) : tLandC - dTh;
+        v[off.TS + c] = s ? (ice ? 271.15 : tSeaC + 0.75 * this.encl[c] * (tLagC - tSeaC)) : tLandC - dTh;
         v[off.BETA + c] = s ? 1 : 0.15 + 0.4 * hum;
         // albedo bez śniegu (śnieg i lód – w pe_rad): morze 0.07, ląd 0.16 (pustynie do 0.28)
         v[off.ALB + c] = s ? 0.07 : 0.16 + 0.12 * (1 - Math.min(1, (lc ? lc.ha[c] : hum) / 0.4));
         v[off.TDEEP + c] = tDeepC - dTh;
-        // klimatologia wody w glebie (NCEP 1991–2020, strefa korzeni) – cel przyciągania wiadra i stan początkowy
-        v[off.SMC + c] = s ? 0 : soilClim(la, lonAt(la, i), doy);
+        // klimatologia wody w glebie (NCEP 1991–2020, strefa korzeni) – cel przyciągania wiadra i stan początkowy;
+        // custom world: soilAt from painted/preset map
+        v[off.SMC + c] = s ? 0 : (this.geo && this.geo.soilAt ? this.geo.soilAt(la, lo, doy) : soilClim(la, lo, doy));
       }
     }
     this.smClim = v.slice(off.SMC, off.SMC + N2);
@@ -583,13 +588,14 @@ export class PEModel {
       // własne miejsce: prawdziwy rozkład lądu i oceanu wokół (mapa świata), kanał okresowy w x
       // kanał na pełne koło: w każdym wierszu całe 360° długości (bez „szwu”; kształty kontynentów poza szerokością
       // domeny ściśnięte / rozciągnięte w x); węższy kanał (tropiki, ?pex=) – odległości wierne, ze szwem
+      // custom world: seaAt() when present (World Builder), else elev ≤ 0
       const full = LXP >= 0.9 * 40075e3 * Math.cos(this.lat * Math.PI / 180);
       for (let j = 0; j < NYP; j++) {
         const la = latY((j + 0.5) * DXP - LYP / 2);
         const kmDeg = 111.32e3 * Math.max(0.2, Math.cos(la * Math.PI / 180));
         for (let i = 0; i < NXP; i++) {
           const lo = this.geo.lon + (full ? 360 * ((i + 0.5) / NXP - 0.5) : ((i + 0.5) * DXP - LXP / 2) / kmDeg);
-          this.sea[j * NXP + i] = this.geo.elev(la, lo) <= 0 ? 1 : 0;
+          this.sea[j * NXP + i] = this.geo.seaAt ? this.geo.seaAt(la, lo) : (this.geo.elev(la, lo) <= 0 ? 1 : 0);
         }
       }
     }

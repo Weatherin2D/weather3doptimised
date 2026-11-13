@@ -425,9 +425,10 @@
       foehn, valleys); larger – synoptic scale (fronts, lows, highs). Size and detail: Settings → Grid.</div>
     <h4>Where to find things</h4>
     <div class="hint">Weather – mode, current air mass, synoptic map and 7-day forecast. Atmosphere – sounding from the probe point or the
-      domain mean, with a full-screen view. Terrain – relief, brush (height, water, surface types), surface, hydrology. Layers – all map
-      layers in expandable groups. Climate analysis – maps and a table of months, seasons and years. Settings – place, date, grid, map
-      overlays, saving and loading. Stations (analysis panel) – any number of measuring points with a table, meteogram and CSV export.</div>
+      domain mean, with a full-screen view. World – relief, custom world builder (presets and brushes for height, sea, lakes, SST, soil,
+      vegetation), surface, hydrology. Layers – all map layers in expandable groups. Climate analysis – maps and a table of months,
+      seasons and years. Settings – place, date, grid, map overlays, saving and loading. Stations (analysis panel) – any number of
+      measuring points with a table, meteogram and CSV export.</div>
     <h4>The synoptic model</h4>
     <div class="hint">Primitive equations on the GPU: a channel around the whole latitude circle, 75 km grid, 12 levels up to 16 km. Lows, highs and
       fronts form by themselves from baroclinic instability – heat and moisture exchange with land and ocean, condensation with precipitation,
@@ -481,6 +482,7 @@
         <button id="ttStart" class="btn primary">Start</button>
         <div class="ttbtns">
           <button id="ttFlat" class="btn" title="No download: flat terrain, climate of Kraków">Start on flat terrain</button>
+          <button id="ttCustom" class="btn" title="No download: build a synthetic geography (island, archipelago, …) shared with the synoptic model">Start custom world</button>
           <button id="ttResume" class="btn" title="Continue a run saved with “Save run” in Settings">Load a saved run…</button>
         </div>
         <input id="ttRunFile" type="file" accept=".w3drun" hidden />
@@ -503,7 +505,7 @@
       <div id="tabs">
         <button data-tab="wx" class="on" title="Weather and synoptic model"><svg viewBox="65 1765 58 38" aria-hidden="true"><path d="M85.9749 1780.28C86.2565 1780.28 86.5374 1780.29 86.8173 1780.31C88.1631 1775.71 91.5716 1772.07 95.9428 1770.37C94.0022 1767.36 90.6294 1765.38 86.7892 1765.38C81.1533 1765.38 76.5158 1769.66 75.9527 1775.15C75.1625 1774.9 74.3227 1774.77 73.453 1774.77C68.7848 1774.77 65 1778.55 65 1783.22C65 1787.89 68.7848 1791.67 73.4529 1791.67H73.5374C74.0939 1785.3 79.4575 1780.28 85.9749 1780.28Z" fill="#000"/><path d="M114.236 1785.1C114.233 1785.1 114.23 1785.1 114.225 1785.1C114.23 1784.95 114.236 1784.81 114.236 1784.66C114.236 1777.64 108.548 1771.95 101.53 1771.95C94.9562 1771.95 89.5482 1776.94 88.8902 1783.35C87.9686 1783.06 86.9906 1782.91 85.9749 1782.91C80.5302 1782.91 76.1164 1787.32 76.1164 1792.77C76.1164 1798.21 80.5302 1802.62 85.9749 1802.62H114.236C119.076 1802.62 123 1798.7 123 1793.86C123 1789.02 119.076 1785.1 114.236 1785.1Z" fill="#000"/></svg>Weather</button>
         <button data-tab="atm" title="Sounding from the probe point or the domain mean">Atmosphere</button>
-        <button data-tab="ter" title="Terrain, brush and surface">Terrain</button>
+        <button data-tab="ter" title="World: relief, custom geography, brush and surface">World</button>
         <button data-tab="view" title="All map layers">Layers</button>
         <button data-tab="mon" title="Climate analysis: months, seasons and years">Climate<br>analysis</button>
         <button data-tab="set" title="Place, date, grid, map overlays, save and load">Settings</button>
@@ -613,7 +615,18 @@
       </div>
 
       <div class="tab" data-panel="ter">
-        <div class="thead"><i class="tmark"></i><span class="ttl">Terrain</span><button class="tclose" title="Close the menu (Esc)">×</button></div>
+        <div class="thead"><i class="tmark"></i><span class="ttl">World</span><button class="tclose" title="Close the menu (Esc)">×</button></div>
+        <div class="box">
+          <h4>Custom world</h4>
+          <div class="hint">Build a synthetic geography (height, sea, lakes, SST, soil, vegetation). The synoptic model uses the same maps around the latitude circle – no DEM download.</div>
+          <label><span class="lbl">Preset</span><select id="worldPreset"></select></label>
+          <div class="btns">
+            <button id="worldApplyPreset" class="btn primary" title="Apply the preset and restart">Apply preset</button>
+            <button id="worldRandom" class="btn" title="New random seed for the current preset">Randomize</button>
+            <button id="worldClear" class="btn" title="Leave custom world mode">Exit custom</button>
+          </div>
+          <div class="hint" id="worldModeHint">Custom world: off</div>
+        </div>
         <div class="box">
           <h4>Relief (a change restarts)</h4>
           <select id="shape"></select>
@@ -630,6 +643,10 @@
           <label><span class="lbl">Paint with</span><select id="paintWhat"></select></label>
           <label><span class="lbl">Brush radius <b id="brushV"></b></span>
             <input id="brush" type="range" min="0.5" max="6" step="0.25" value="2" /></label>
+          <label id="sstBrushLab" style="display:none"><span class="lbl">SST brush [°C] <b id="sstBrushV">15</b></span>
+            <input id="sstBrush" type="range" min="-2" max="32" step="0.5" value="15" /></label>
+          <label id="soilBrushLab" style="display:none"><span class="lbl">Soil brush <b id="soilBrushV">55 %</b></span>
+            <input id="soilBrush" type="range" min="0" max="100" step="5" value="55" /></label>
         </div>
         <div class="box">
           <h4>Surface (a change restarts)</h4>

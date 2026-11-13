@@ -2,6 +2,10 @@ import { ccN, kfrOf, CFG, SFC, AIRMASSES, NPAR as NPAR_G, scaleClass, NICE_DX, R
 import { SHAPES, genShape, shapeFromImage, paintBrush, deriveTerrain, heightPng } from './terrain.js';
 import { LANDUSE, makeLand } from './land.js';
 import { LOCATIONS, CLIM, climate, biome, VEG, VEG_NAMES } from './climate.js';
+import {
+  WORLD_PRESETS, SYN_BASELINES, createWorld, applyPreset, paintWorld,
+  packWorld, unpackWorld, worldFingerprint, peWorldSampler,
+} from './world.js';
 import { baseClim } from './climbase.js';
 import { fetchTerrain, fetchTerrainHi, peakFine, fetchLandCover, fetchCities, cachedClimate, cachedNormals, climateOf, MONTH_DAYS, fetchNormals, worldDem, worldElev, regionDem, demColor, lonLatToTile, tileToLonLat } from './geo.js';
 import { PEModel, DTQ, NXP, NYP, DXP, LXP, LYP, classifyCenter, nestNodes, sstClim } from './pe.js';
@@ -391,6 +395,7 @@ async function init() {
     stats: null, means: null, sfc: null, busy: true,
     flat: true, seed: 1, h: new Float32Array(NXY), hv: new Float32Array(NXV * NYV), hmax: 0, startHour: 6, doy0: 172, year: 2026,
     paint: null,
+    worldOn: false, world: null,   // Custom World Builder maps (h, sea, sst, soil, veg, lake)
     probe: { i: MG + Math.floor(NXD / 2), j: MG + Math.floor(NYD / 2) },   // sonda (domyślnie środek mapy)
     probeEnc: -1, probeColAt: -1, probeCol: null,
   };
@@ -505,6 +510,7 @@ async function init() {
       else if (lv.cls[c] === 3 && sim.wmask && sim.wmask[c] === -1) lv.cls[c] = 0;
       if (sim.lmask && sim.lmask[c] >= 0 && lv.cls[c] !== 3) lv.cls[c] = sim.lmask[c];   // pokrycie malowane pędzlem
       if (sim.lwet && sim.lwet[c] > 0) lv.w[c] = Math.min(1, lv.w[c] + 0.6 * sim.lwet[c]);   // mokradła z mapy pokrycia
+      if (sim.worldOn && sim.world && !sim.world.sea[c] && !sim.world.lake[c]) lv.w[c] = sim.world.soil[c];
     }
     sim.land = { cls: embed(lv.cls, CFG, true), w: embed(lv.w) };
     // roślinność z klimatu (szerokość, kontynentalizm, wilgotność klimatu) i wysokości terenu
@@ -525,12 +531,90 @@ async function init() {
     device.queue.writeBuffer(vgBuf, grid.off.RCV * 4, flowNet());     // ujścia do jezior i morza
   }
   function setShape(kind) {
-    if (kind === 'image' || kind === 'painted' || kind === 'dem') return;
+    if (kind === 'image' || kind === 'painted' || kind === 'dem' || kind === 'world') return;
     sim.wmask = null;
     const shape = genShape(kind, CFGV, sim.seed);
     const hm = kind === 'flat' ? 0 : num('hills');
     for (let c = 0; c < NXV * NYV; c++) sim.hv[c] = shape[c] * hm;
     applyTerrain();
+  }
+
+  // --- Custom World Builder: shared maps → domain state ---
+  function worldHint() {
+    const el = $('worldModeHint');
+    if (!el) return;
+    el.textContent = sim.worldOn && sim.world
+      ? `Custom world: on · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · seed ${sim.world.seed}`
+      : 'Custom world: off';
+  }
+  function ensureWorld(seed = sim.seed) {
+    if (!sim.world || sim.world.nx !== NXV || sim.world.ny !== NYV) {
+      const prev = sim.world;
+      sim.world = createWorld(NXV, NYV, seed);
+      if (prev && prev.preset) applyPreset(sim.world, prev.preset, seed);
+    }
+    return sim.world;
+  }
+  function applyWorldToSim() {
+    const w = ensureWorld();
+    sim.wmask = new Int8Array(NXV * NYV);
+    sim.lmask = new Int8Array(NXV * NYV).fill(-1);
+    sim.vmask = new Int8Array(NXV * NYV).fill(-1);
+    let hmax = 0, soilSum = 0, soilN = 0;
+    for (let c = 0; c < NXV * NYV; c++) {
+      const water = w.sea[c] || w.lake[c];
+      sim.hv[c] = water ? 0 : Math.max(0, w.h[c]);
+      hmax = Math.max(hmax, sim.hv[c]);
+      if (water) sim.wmask[c] = 1;
+      else { sim.wmask[c] = -1; soilSum += w.soil[c]; soilN++; }
+      if (w.veg[c] >= 0 && !water) {
+        sim.vmask[c] = w.veg[c];
+        const VEG_CLS = { [VEG.DECID]: 1, [VEG.TAIGA]: 1, [VEG.RAINFOREST]: 1, [VEG.SCLERO]: 1, [VEG.URBAN]: 2 };
+        sim.lmask[c] = VEG_CLS[w.veg[c]] ?? 0;
+      }
+    }
+    $('shape').value = 'world';
+    $('hills').value = String(Math.round(hmax / 50) * 50 || 0);
+    if (soilN) $('soil').value = String(Math.round(100 * soilSum / soilN / 5) * 5);
+    sim.worldOn = true;
+    applyTerrain();
+    applyLand();
+    // override soil from world map after applyLand mosaic
+    if (sim.land) {
+      for (let j = 0; j < NYV; j++) {
+        for (let i = 0; i < NXV; i++) {
+          const c = j * NXV + i, cc = j * NX + i;
+          if (w.sea[c] || w.lake[c]) continue;
+          sim.land.w[cc] = w.soil[c];
+        }
+      }
+    }
+    worldHint();
+  }
+  function enableCustomWorld(preset = 'island', seed = 1 + Math.floor(Math.random() * 1e9)) {
+    const w = ensureWorld(seed);
+    applyPreset(w, preset, seed);
+    const base = SYN_BASELINES[preset] || SYN_BASELINES.flat;
+    ensureCustom(`Custom world: ${WORLD_PRESETS[preset] || preset}`);
+    $('location').value = 'custom';
+    $('lat').value = base.lat; $('lon').value = base.lon; $('cont').value = base.cont; $('hum').value = base.hum;
+    $('tbias').value = 0; CLIM.bias = 0;
+    if ($('worldPreset')) $('worldPreset').value = preset;
+    // Atmosphere manipulation baselines for this preset
+    $('tanom').value = base.T;
+    $('manipR').value = nearest(MANIP_RAIN, base.R);
+    $('manipV').value = nearest(MANIP_VAR, base.V);
+    applyWorldToSim();
+    labels();
+  }
+  function disableCustomWorld() {
+    sim.worldOn = false;
+    sim.world = null;
+    sim.wmask = null; sim.lmask = null; sim.vmask = null;
+    $('shape').value = 'flat';
+    setShape('flat');
+    applyLand();
+    worldHint();
   }
 
   // --- Masa powietrza: przebudowa stanu bazowego (profile w buforze vg) ---
@@ -552,7 +636,7 @@ async function init() {
   const drv = { mode: 'syn', seed: 1 + Math.floor(Math.random() * 1e6), key: '', start: null, model: null,
     tA: 0, slot: 0, pg0: null, cls: null, fc: [], fcModel: null, synDirty: false, lastDraw: 0 };
   const cellRnd = (c) => (Math.imul(c + 1, 2654435761) >>> 0) / 4294967296;   // stała liczba losowa oczka 0…1 (pas lasu mieszanego)
-  const climKey = () => [num('lat'), num('cont'), num('hum'), dayOfYear($('date').value), drv.seed, $('location').value === 'custom' ? num('lon') : 'x', num('tbias'), num('hour'), MANIP_VAR[num('manipV')]].join('|');
+  const climKey = () => [num('lat'), num('cont'), num('hum'), dayOfYear($('date').value), drv.seed, $('location').value === 'custom' || sim.worldOn ? num('lon') : 'x', num('tbias'), num('hour'), MANIP_VAR[num('manipV')], sim.worldOn ? worldFingerprint(sim.world) : ''].join('|');
   // Manipulacja atmosfery (zakładka Weather, strona tytułowa): T – anomalia temperatury [K], R – mnożnik opadu, V – zmienność pogody. Przy starcie działa od razu
   // (stan początkowy, rozbieg modelu synoptycznego), a zmiana w trakcie przebiegu wchodzi liniowo przez wybrany czas (odcinek from → to w t0…t1). Ten sam odcinek
   // widzą kopie modelu synoptycznego w swoim czasie, więc prognoza już pokazuje to, co nadchodzi. log – historia nastaw (ostatni wiersz CSV).
@@ -1206,7 +1290,9 @@ async function init() {
     for (const m of [drv.start, drv.fcModel, drv.ccModel]) if (m) m.destroy();
     drv.ccModel = null;
     let geo = null;
-    if ($('location').value === 'custom') {
+    if (sim.worldOn && sim.world) {
+      geo = peWorldSampler(sim.world, { lat0: num('lat'), lon0: num('lon'), dx: CFG.DX, dy: CFG.DY, nx: NXV, ny: NYV });
+    } else if ($('location').value === 'custom') {
       try { const w = await worldDem(); geo = { lon: num('lon'), elev: (la, lo) => worldElev(w, la, lo) }; } catch { geo = null; }
     }
     const m = await PEModel.create(device, { varAt: manipVarAt, lat: num('lat'), lon: num('lon'), cont: num('cont'), hum: num('hum'), doy: dayOfYear($('date').value), hour: num('hour'),   // godzina startu: słońce w PE zgodne z domeną
@@ -1306,9 +1392,15 @@ async function init() {
       const h = sim.h[c], tAir = airTz(pv, h) + tan + ccAt(h, pv[2], (c % NX) + 0.5, Math.floor(c / NX) + 0.5), ph = snd.pres(h);
       // morze (woda na poziomie morza) w trybie synoptycznym: ta sama klimatologia SST co model synoptyczny
       // (wcześniej formuła klimatu lądu: Zatoka Alaska w styczniu ~0 °C zamiast ~+6 °C); jeziora – z suwaka „woda”
+      // custom world: painted SST on the domain cell when set
+      const vi = (c % NX), vj = Math.floor(c / NX);
+      const wc = (vi < NXV && vj < NYV) ? vj * NXV + vi : -1;
+      const worldSst = sim.worldOn && sim.world && wc >= 0 && Number.isFinite(sim.world.sst[wc]) ? sim.world.sst[wc] : null;
       const sxy = isWater && h <= 1 && drv.mode === 'syn' && drv.model ? drv.model.seaTemp(((c % NX) + 0.5 - NXV / 2) * CFG.DX, (Math.floor(c / NX) + 0.5 - NYV / 2) * CFG.DY) : null;
       // (suwak ustawiony ręcznie – także morze)
-      const wT = isWater && h <= 1 && drv.mode === 'syn' && !sim.waterUser ? (sxy ?? sstClim(latRow(c), doy)) + 273.15 + tan : water;
+      const wT = isWater && h <= 1 && !sim.waterUser
+        ? (worldSst !== null ? worldSst + 273.15 + tan : (drv.mode === 'syn' ? (sxy ?? sstClim(latRow(c), doy)) + 273.15 + tan : water))
+        : water;
       const tg = isWater ? wT : tAir - cool0;
       sf[S.TS * NXY + c] = tg;
       // głębsza warstwa gleby ≈ średnia temperatura z ostatnich tygodni: norma klimatyczna dla daty,
@@ -1873,7 +1965,7 @@ async function init() {
   ];
 
   // --- menu (pasek ikon po lewej): klik otwiera wysuwany panel nad mapą, ponowny klik / × / Esc go chowa ---
-  const TAB_TITLES = { wx: 'Weather', atm: 'Atmosphere', ter: 'Terrain', view: 'Layers', mon: 'Climate analysis', set: 'Settings' };
+  const TAB_TITLES = { wx: 'Weather', atm: 'Atmosphere', ter: 'World', view: 'Layers', mon: 'Climate analysis', set: 'Settings' };
   const curTab = () => { const b = document.querySelector('#tabs button.on'); return b ? b.dataset.tab : 'wx'; };
   function selectTab(name, open) {
     document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('on', x.dataset.tab === name));
@@ -2215,11 +2307,12 @@ async function init() {
     const st = { v: 1, grid: { dx: CFG.DX, nx: NXD, ny: NYD, mg: MG, bc: CFG.OPEN ? 'open' : 'per' }, ui,
       seed: sim.seed, synSeed: drv.seed, mode: drv.mode, air: sim.air };
     const sh = $('shape').value;
-    if (sh === 'image' || sh === 'painted' || sh === 'dem') st.hv = Array.from(sim.hv, (h) => Math.round(h));
+    if (sh === 'image' || sh === 'painted' || sh === 'dem' || sh === 'world') st.hv = Array.from(sim.hv, (h) => Math.round(h));
     if (sim.wmask) st.wmask = Array.from(sim.wmask);
     if (sim.lmask) st.lmask = Array.from(sim.lmask);
     if (sim.vmask) st.vmask = Array.from(sim.vmask);
     if (sim.lwet) st.lwet = Array.from(sim.lwet, (x) => Math.round(100 * x));
+    if (sim.worldOn && sim.world) st.world = packWorld(sim.world);
     st.stations = stations.exportList();
     st.manip = manip;
     if (sh === 'dem' && sim.demLL) st.demLL = sim.demLL;            // środek terenu z DEM (gęstszy teren do obrazu)
@@ -2239,7 +2332,16 @@ async function init() {
     drv.seed = st.synSeed;
     drv.mode = st.mode;
     sim.air = st.air || airParams();
+    if (st.world) {
+      sim.world = unpackWorld(st.world, NXV, NYV);
+      sim.worldOn = true;
+      if ($('worldPreset') && sim.world.preset) $('worldPreset').value = sim.world.preset;
+      worldHint();
+    } else {
+      sim.worldOn = false; sim.world = null; worldHint();
+    }
     if (st.hv && st.hv.length === NXV * NYV) sim.hv.set(st.hv);
+    else if (sim.worldOn) applyWorldToSim();
     else setShape($('shape').value);
     sim.wmask = st.wmask && st.wmask.length === NXV * NYV ? Int8Array.from(st.wmask) : null;
     sim.lmask = st.lmask && st.lmask.length === NXV * NYV ? Int8Array.from(st.lmask) : null;
@@ -2254,7 +2356,7 @@ async function init() {
     if (st.stations) stations.importList(st.stations);
     applyTerrain();
     applyLand();
-    if ($('shape').value === 'dem' && st.ui.location === 'custom') { const ll = st.demLL || [num('lat'), num('lon')]; loadDemHi(...ll).then(() => loadVegHi(...ll)); }
+    if ($('shape').value === 'dem' && st.ui.location === 'custom' && !sim.worldOn) { const ll = st.demLL || [num('lat'), num('lon')]; loadDemHi(...ll).then(() => loadVegHi(...ll)); }
     reset();
     labels();
     drawPreview();
@@ -2869,13 +2971,23 @@ async function init() {
     const k = $('shape').value;
     if (k === 'image') { $('imgFile').click(); return; }
     if (k === 'dem') { $('worldOpen').click(); return; }
+    if (k === 'world') {
+      enableCustomWorld(($('worldPreset') && $('worldPreset').value) || 'island');
+      reset(); labels();
+      return;
+    }
+    if (sim.worldOn) { sim.worldOn = false; sim.world = null; worldHint(); }
     if (k !== 'flat' && num('hills') === 0) $('hills').value = 800;
     setShape(k); applyLand(); reset(); labels();
   };
   $('hills').addEventListener('change', () => {
     const k = $('shape').value, hm = num('hills');
-    if (k === 'image' || k === 'painted' || k === 'dem') {
-      if (sim.hmax > 0) for (let c = 0; c < NXV * NYV; c++) sim.hv[c] *= hm / sim.hmax;   // przeskalowanie mapy
+    if (k === 'image' || k === 'painted' || k === 'dem' || k === 'world') {
+      if (sim.hmax > 0) {
+        const s = hm / sim.hmax;
+        for (let c = 0; c < NXV * NYV; c++) sim.hv[c] *= s;
+        if (sim.worldOn && sim.world) for (let c = 0; c < NXV * NYV; c++) if (!sim.world.sea[c] && !sim.world.lake[c]) sim.world.h[c] *= s;
+      }
       applyTerrain();
     } else {
       if (k === 'flat' && hm > 0) $('shape').value = 'perlin';
@@ -2911,25 +3023,60 @@ async function init() {
     a.download = `terrain_${Math.round(sim.hmax)}m.png`;
     a.click();
   };
-  // pędzle: wysokość, woda, typy powierzchni; przy malowaniu mapa wysokości albo typów powierzchni
+  // pędzle: wysokość, woda, SST, gleba, typy powierzchni; przy malowaniu mapa wysokości albo typów powierzchni
   {
     const sel = $('paintWhat');
     sel.add(new Option('Terrain height', 'terrain'));
     sel.add(new Option('Water (lake, sea)', 'water'));
+    sel.add(new Option('Sea (custom world)', 'sea'));
+    sel.add(new Option('Lake (custom world)', 'lake'));
+    sel.add(new Option('Sea surface temperature', 'sst'));
+    sel.add(new Option('Soil moisture', 'soil'));
     const g = document.createElement('optgroup');
     g.label = 'Surface type';
     for (const k of [VEG.GRASS, VEG.DECID, VEG.TAIGA, VEG.SCLERO, VEG.RAINFOREST, VEG.SAVANNA, VEG.STEPPE, VEG.DESERT, VEG.TUNDRA, VEG.GLACIER, VEG.URBAN]) {
       g.appendChild(new Option(VEG_NAMES[k][0].toUpperCase() + VEG_NAMES[k].slice(1), `veg:${k}`));
     }
     sel.appendChild(g);
+    const brushLabs = () => {
+      const v = sel.value;
+      if ($('sstBrushLab')) $('sstBrushLab').style.display = v === 'sst' ? '' : 'none';
+      if ($('soilBrushLab')) $('soilBrushLab').style.display = v === 'soil' ? '' : 'none';
+    };
     const paintView = () => {
+      brushLabs();
       if (!$('paint').checked) return;
-      $('fieldH').value = sel.value === 'terrain' ? '30' : '79';
+      $('fieldH').value = sel.value === 'terrain' || sel.value === 'sst' || sel.value === 'soil' ? (sel.value === 'terrain' ? '30' : '79') : '79';
       $('fieldH').dispatchEvent(new Event('change'));
       labels();
     };
     $('paint').onchange = paintView;
     sel.onchange = paintView;
+    if ($('sstBrush')) $('sstBrush').oninput = () => { $('sstBrushV').textContent = `${num('sstBrush')}`; };
+    if ($('soilBrush')) $('soilBrush').oninput = () => { $('soilBrushV').textContent = `${num('soilBrush')} %`; };
+  }
+  // World Builder UI
+  {
+    const sel = $('worldPreset');
+    if (sel) {
+      for (const [k, name] of Object.entries(WORLD_PRESETS)) sel.add(new Option(name, k));
+      sel.value = 'island';
+    }
+    if ($('worldApplyPreset')) $('worldApplyPreset').onclick = () => {
+      const p = $('worldPreset').value || 'island';
+      enableCustomWorld(p, sim.world?.seed || (1 + Math.floor(Math.random() * 1e9)));
+      reset(); labels();
+    };
+    if ($('worldRandom')) $('worldRandom').onclick = () => {
+      const p = ($('worldPreset') && $('worldPreset').value) || sim.world?.preset || 'island';
+      enableCustomWorld(p, 1 + Math.floor(Math.random() * 1e9));
+      reset(); labels();
+    };
+    if ($('worldClear')) $('worldClear').onclick = () => {
+      disableCustomWorld();
+      reset(); labels();
+    };
+    worldHint();
   }
   $('accWin').addEventListener('change', () => { accBase(); labels(); });
   $('monSel').addEventListener('input', () => monPick());
@@ -4756,8 +4903,12 @@ async function init() {
   // pokrycie), jeden restart; ekran wczytywania pokazuje postęp. Bez miejsca (",,5") – płaski teren, klimat domyślny.
   async function startFromTitle(arg) {
     const [la, lo, mo] = arg.split(','), say = (m) => { $('loadMsg').textContent = m; };
+    const wantWorld = new URLSearchParams(location.search).get('world') === '1';
     if (mo !== undefined && mo !== '') $('date').value = `${($('date').value || '2026').slice(0, 4)}-${String(+mo + 1).padStart(2, '0')}-01`;
-    if (la !== '' && lo !== undefined && lo !== '') {
+    if (wantWorld) {
+      say('Building custom world…');
+      enableCustomWorld('island');
+    } else if (la !== '' && lo !== undefined && lo !== '') {
       const lat = +la, lon = +lo;
       try {
         const c = placeClimate(lat, lon);
@@ -4925,15 +5076,59 @@ async function init() {
     last = now;
     flyTick(realDt);
 
-    // malowanie terenu (na żywo, bez restartu)
+    // malowanie terenu / custom world (na żywo, bez restartu)
     const pw = $('paintWhat').value;
     if (sim.paint && pw === 'water') {
       paintWater(sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign > 0);
+    } else if (sim.paint && (pw === 'sea' || pw === 'lake' || pw === 'sst' || pw === 'soil')) {
+      const w = ensureWorld();
+      sim.worldOn = true;
+      $('shape').value = 'world';
+      const r = num('brush') * 1000 / CFG.DX;
+      if (pw === 'sst') {
+        const target = num('sstBrush');
+        const R = Math.ceil(r);
+        for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+          const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
+          if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
+          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > r) continue;
+          const c = jj * NXV + ii;
+          if (!(w.sea[c] || w.lake[c])) continue;
+          const aim = sim.paint.sign > 0 ? target : Math.max(-1.8, (Number.isFinite(w.sst[c]) ? w.sst[c] : target) - 2);
+          const cur = Number.isFinite(w.sst[c]) ? w.sst[c] : aim;
+          w.sst[c] = cur + (aim - cur) * Math.min(1, 4 * realDt);
+        }
+      } else if (pw === 'soil') {
+        const target = num('soilBrush') / 100;
+        const R = Math.ceil(r);
+        for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+          const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
+          if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
+          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > r) continue;
+          const c = jj * NXV + ii;
+          if (w.sea[c] || w.lake[c]) continue;
+          const aim = sim.paint.sign > 0 ? target : Math.max(0, w.soil[c] - 0.15);
+          w.soil[c] = w.soil[c] + (aim - w.soil[c]) * Math.min(1, 4 * realDt);
+        }
+        applyWorldToSim();
+        if (sim.land) setSoil();
+      } else {
+        paintWorld(w, pw, sim.paint.x, sim.paint.y, r, sim.paint.sign > 0 ? 1 : 0, { wrap: !CFG.OPEN, hard: true });
+        applyWorldToSim();
+      }
+      worldHint();
     } else if (sim.paint && pw.startsWith('veg:')) {
       paintSurface(sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign > 0 ? +pw.slice(4) : -1);
+      if (sim.worldOn && sim.world) {
+        const veg = sim.paint.sign > 0 ? +pw.slice(4) : -1;
+        paintWorld(sim.world, 'veg', sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, veg, { wrap: !CFG.OPEN, hard: true });
+      }
     } else if (sim.paint) {
       paintBrush(sim.hv, CFGV, sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign * 600 * realDt, 8000, !CFG.OPEN);
-      $('shape').value = 'painted';
+      if (sim.worldOn && sim.world) {
+        paintWorld(sim.world, 'h', sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign * 600 * realDt, { wrap: !CFG.OPEN });
+        $('shape').value = 'world';
+      } else $('shape').value = 'painted';
       applyTerrain();
       $('hills').value = String(Math.round(sim.hmax / 50) * 50);
       $('hillsV').textContent = fmH(sim.hmax);

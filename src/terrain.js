@@ -44,6 +44,7 @@ export const SHAPES = {
   valley: 'East–west valley',
   image: 'From an image (load a file)',
   painted: 'Custom (painted)',
+  world: 'Custom world (builder)',
   dem: 'From the world map (SRTM data)',
 };
 

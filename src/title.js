@@ -273,20 +273,23 @@ cv.addEventListener('dblclick', () => { fitView(); drawReq(); });
 new ResizeObserver(drawReq).observe(cv);
 
 // ---------- start: adres z wyborem bez przeładowania, potem wczytanie symulacji (main.js dokończy: klimat, teren, model) ----------
-async function start(place) {
+async function start(place, custom = false) {
   const g = plan();
   saveQualityMode(st.quality);
   savePref();
   const a = place ? `${st.lat.toFixed(3)},${st.lon.toFixed(3)},${st.month}` : `,,${st.month}`;
   const nz = recommendNz(gpu.tier, g.nx, g.ny, st.quality);
   const nzQ = nz ? `&nz=${nz}` : '';
-  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${nzQ}&start=${a}${manipQuery(manT(), manR(), manV())}`);
+  const worldQ = custom ? '&world=1' : '';
+  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${nzQ}${worldQ}&start=${a}${manipQuery(manT(), manR(), manV())}`);
   $('titleScr').classList.remove('on');
   $('loadScr').classList.add('on');
   await import('./main.js');
 }
+function startCustom() { return start(false, true); }
 $('ttStart').onclick = () => start(true);
 $('ttFlat').onclick = () => start(false);
+$('ttCustom').onclick = () => startCustom();
 // zapisany przebieg: plik do pamięci przeglądarki, adres z siatką przebiegu (main.js wczyta go od razu, bez rozbiegu)
 $('ttResume').onclick = () => $('ttRunFile').click();
 $('ttRunFile').onchange = async () => {
