@@ -3,10 +3,13 @@ name: Publish the page
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -24,7 +27,18 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build
+      - run: npm run build:pages
+      - name: Commit docs/ for legacy Pages (main /)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs
+          if git diff --staged --quiet; then
+            echo "docs/ already up to date"
+          else
+            git commit -m "chore: sync Vite dist to docs/ for GitHub Pages"
+            git push
+          fi
       - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
@@ -32,6 +46,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Succeeds only when repo Pages build_type is "workflow".
+    # Legacy main-/ still works via docs/ sync above + root redirect.
+    continue-on-error: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

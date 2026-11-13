@@ -4,8 +4,10 @@
   "description": "3D weather simulation in the browser (WebGPU)",
   "license": "MIT",
   "scripts": {
-    "dev": "vite --open",
+    "dev": "vite --open /index.vite.html",
     "build": "vite build",
+    "pages:sync": "node scripts/sync-pages-docs.mjs",
+    "build:pages": "npm run build && npm run pages:sync",
     "preview": "vite preview"
   },
   "type": "module",
