@@ -17,6 +17,10 @@ import { createStations } from './stations.js';
 import { toD, fromD, unitD, nD, fm, fT, fdT, fmH, fmZ, fmDx, fmVis, rnd, isImp, setImp, onUnits } from './units.js';
 import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, nearest, manipQuery, seg, segAt } from './manip.js';
 import { packRun, openRun, jsonPack, jsonUnpack, stashRun, stashedRun, clearStash, resumeUrl } from './runfile.js';
+import {
+  QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync, resolveQuality,
+  cgItersFor, frameBudgetMs, diagIntervalMs, canvasScale, volStride, maxStepsFor,
+} from './perf.js';
 import commonSrc from './shaders/common.wgsl?raw';
 import simSrc from './shaders/sim.wgsl?raw';
 import renderSrc from './shaders/render.wgsl?raw';
@@ -26,10 +30,9 @@ import view3dnSrc from './shaders/view3dn.wgsl?raw';
 import atmoSrc from './shaders/atmo.wgsl?raw';
 import atmoLutSrc from './shaders/atmolut.wgsl?raw';
 
-const MAX_STEPS = 128;      // maks. liczba kroków na klatkę
 const SLOT = 256;           // odstęp slotów parametrów w buforze uniform (wyrównanie dynamicznego offsetu)
 const WG = 256;
-const CG_ITERS = (+new URLSearchParams(location.search).get('cg')) || 4;   // iteracje gradientów sprzężonych na krok (tylko z terenem; z FFT 4 wystarczą – błąd ~2e-7 1/s; test: ?cg=20)
+const URL_CG = (+new URLSearchParams(location.search).get('cg')) || 0;   // ?cg= nadpisuje adaptacyjną liczbę iteracji CG
 const PARAM_BYTES = 144;
 const VIEW_BYTES = 144 + 2 * 576;   // + przesunięcie wzoru cumulusów (36 kafli × vec4): wiatr warstwy cumulusów i średni 0–6 km
 // zoom mapy: powiększenie s (1 = cała mapa, ≤ 16) i lewy górny róg okna widoku (x, y – ułamek domeny, y w dół)
@@ -72,6 +75,27 @@ async function init() {
 
   const { NX, NY, NZ, DT } = CFG;
   const NXY = NX * NY, N = NXY * NZ, NW = NXY * (NZ + 1);
+  // jakość: Auto / Smooth / Balanced / Fidelity – mniej CG, rzadsze odczyty, niższa gęstość pikseli
+  const perfState = { mode: loadQualityMode(), tier: 'mid', label: 'WebGPU', reason: '', quality: 'balanced', cg: 4 };
+  const gpuInfo = await detectGpuTierAsync(adapter);
+  Object.assign(perfState, gpuInfo);
+  const quality = () => resolveQuality(perfState.mode, perfState.tier, N);
+  const refreshQuality = () => {
+    perfState.quality = quality();
+    perfState.cg = cgItersFor(perfState.quality, N, URL_CG);
+    const el = $('qualitySeg');
+    if (el) for (const b of el.children) b.classList.toggle('on', b.dataset.q === perfState.mode);
+    const qm = QUALITY_MODES.find((q) => q.id === perfState.mode);
+    const info = $('qualityInfo');
+    if (info) {
+      info.textContent = `${qm?.hint || ''} · GPU: ${perfState.label} (${perfState.tier}${perfState.reason ? ', ' + perfState.reason : ''}) → ${perfState.quality}, CG ${perfState.cg}`;
+    }
+  };
+  const applyQuality = (id) => {
+    if (id) { perfState.mode = id; saveQualityMode(id); }
+    refreshQuality();
+  };
+  refreshQuality();
   const T_OFF = 2 * N + NW, QV_OFF = T_OFF + N, STATE_LEN = T_OFF + 6 * N;   // θ', q_v, q_c, q_i, q_r, N_r
   const NSF = SFC.length;
   const S = Object.fromEntries(SFC.map((n, i) => [n, i]));
@@ -127,19 +151,21 @@ async function init() {
   const tmpBuf = buf(STATE_LEN * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'tmp');
   const W_MSC = W_MEAN + 4 * NZ + 8 * NPART;
   const W_MUV = W_MSC + 4 + 6 * CFG.MEB + 2 * NZ;      // średni wiatr na poziomach (2 · NZ), sondaż średniej domeny
-  const workBuf = buf((W_MUV + 2 * NZ + 1) * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'work');   // + W_HM (średni strumień ciepła z gruntu)
+  const W_HM = W_MUV + 2 * NZ;
+  const W_PROBE = W_HM + 8;
+  // sonda: kolumna w wybranym punkcie (u, v, θ', q_v, q_c, q_i, q_r po NZ poziomów + w na NZ + 1 ścianach)
+  const PROBE_N = 7 * NZ + NZ + 1, PROBE_OFF = STATS_BYTES + 16 * NZ + NSF * NXY * 4;
+  const workBuf = buf((W_PROBE + PROBE_N) * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'work');   // + W_HM + W_PROBE (spakowana sonda)
   const cxBuf = buf(2 * N * 8, U.STORAGE, 'complex');
   const vgBuf = buf(grid.data.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'vgrid');
   const statsBuf = buf(STATS_BYTES, U.STORAGE | U.COPY_SRC | U.COPY_DST, 'stats');
   const sfcBuf = buf(NSF * NXY * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC, 'surface');
-  // sonda: kolumna w wybranym punkcie (u, v, θ', q_v, q_c, q_i, q_r po NZ poziomów + w na NZ + 1 ścianach)
-  const PROBE_N = 7 * NZ + NZ + 1, PROBE_OFF = STATS_BYTES + 16 * NZ + NSF * NXY * 4;
   // stacje wyżej niż grunt modelu (szczyty): θ', q_v, u, v na dwóch poziomach wokół wysokości stacji (12 liczb na stację)
   const ST_AIR = 32, ST_AIR_OFF = PROBE_OFF + PROBE_N * 4;
   const MUV_OFF = ST_AIR_OFF + ST_AIR * 48;
   const DIAG_BYTES = MUV_OFF + 8 * NZ;
   const diagRead = buf(DIAG_BYTES, U.MAP_READ | U.COPY_DST, 'diagRead');
-  const paramBuf = buf(SLOT * MAX_STEPS, U.UNIFORM | U.COPY_DST, 'params');
+  const paramBuf = buf(SLOT * 128, U.UNIFORM | U.COPY_DST, 'params');   // 128 = maks. kroków (Fidelity)
   const TG_SLOT = 4 * N + 15 * NXY;                // pola docelowe jednego terminu (3D: θ', q_v, u, v; 2D: u_g, v_g, p, w, geometria frontu ×8, diagnostyka ×3)
   const NF = kfrOf(grid) * NXY;                    // wyostrzenie frontów Φ (θ', q_v, u, v) na poziomach poniżej ~7 km, dwa bufory na zmianę
   const tgtBuf = buf((3 * TG_SLOT + 8 * NF) * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST, 'targets');
@@ -186,13 +212,24 @@ async function init() {
     ? [lines('fft_x', NY * NZ), lines('fft_y', NX * NZ), K('tridiag', NXY, 64), lines('ifft_y', NX * NZ), lines('ifft_x', NY * NZ), K('cg_rz', N)]
     : [K('dft_x', N), K('dft_y', N), K('tridiag', NXY, 64), K('idft_y', N), K('idft_z', N)];
   const seqFlat = [...head, ...precond, K('phi_add', N), K('project', T_OFF)];
-  const iters = [];
-  for (let it = 0; it < CG_ITERS; it++) {
-    iters.push(K('cg_ap', N), one('cg_alpha'), K('cg_xr', N));
-    if (it < CG_ITERS - 1) iters.push(...precond, one('cg_beta'), K('cg_p', N));
+  function makeTerrainSeq(cgIters) {
+    const iters = [];
+    for (let it = 0; it < cgIters; it++) {
+      iters.push(K('cg_ap', N), one('cg_alpha'), K('cg_xr', N));
+      if (it < cgIters - 1) iters.push(...precond, one('cg_beta'), K('cg_p', N));
+    }
+    return [...head, ...precond, one('cg_rz0'), K('cg_p', N), ...iters, K('project', T_OFF)];
   }
-  const seqTerrain = [...head, ...precond, one('cg_rz0'), K('cg_p', N), ...iters, K('project', T_OFF)];
+  const terrainByCg = { 2: makeTerrainSeq(2), 3: makeTerrainSeq(3), 4: makeTerrainSeq(4) };
+  // sekwencje z ?cg= > 4 budowane na żądanie; poniżej 2 – używamy 2
+  const terrainSeq = () => {
+    const n = Math.min(20, Math.max(1, perfState.cg | 0));
+    if (terrainByCg[n]) return terrainByCg[n];
+    if (n > 4) return (terrainByCg[n] = makeTerrainSeq(n));
+    return terrainByCg[2];
+  };
   const statsPipe = K('stats_k', N);
+  const probePipe = { p: pipe('diag_probe'), g: [1, 1] };
   const tgtBuild = K('tgt_build', NXY, 64);
   // wiatr docelowy bez części rozbieżnej (2D na każdym poziomie)
   const tgtProj = FFT
@@ -1349,6 +1386,8 @@ async function init() {
       f[33] = mAt('R', t);
       // zmiana deklinacji [rad/dobę] – fenologia (dzień się wydłuża / skraca)
       f[32] = 23.44 * Math.PI / 180 * 2 * Math.PI / 365 * Math.cos(2 * Math.PI * (284 + ck.doy) / 365);
+      u[34] = sim.probe ? sim.probe.i : (MG + Math.floor(NXD / 2));
+      u[35] = sim.probe ? sim.probe.j : (MG + Math.floor(NYD / 2));
     }
     device.queue.writeBuffer(paramBuf, 0, ab);
   }
@@ -1358,8 +1397,9 @@ async function init() {
   function encodeSteps(enc, n, useTS) {
     const pass = enc.beginComputePass(useTS
       ? { timestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : {});
+    const seq = sim.flat ? seqFlat : terrainSeq();
     for (let s = 0; s < n; s++) {
-      for (const k of sim.flat ? seqFlat : seqTerrain) {
+      for (const k of seq) {
         pass.setPipeline(k.p);
         pass.setBindGroup(0, simBG, [s * SLOT]);
         pass.dispatchWorkgroups(k.g[0], k.g[1]);
@@ -1371,9 +1411,10 @@ async function init() {
   // n kroków; przy przejściu przez termin pól docelowych – nowy termin z modelu synoptycznego
   function runSteps(n, measure) {
     let done = 0, first = true;
+    const maxSteps = maxStepsFor(perfState.quality);
     while (done < n) {
       if (sim.time + DT > drv.tA + DTQ + 1e-6) { advanceDriver(); continue; }
-      const m = Math.max(1, Math.min(n - done, MAX_STEPS, Math.floor((drv.tA + DTQ - sim.time) / DT + 1e-6)));
+      const m = Math.max(1, Math.min(n - done, maxSteps, Math.floor((drv.tA + DTQ - sim.time) / DT + 1e-6)));
       writeParams(m);
       const enc = device.createCommandEncoder();
       const useTS = measure && first && ts && !ts.pending;
@@ -1408,7 +1449,8 @@ async function init() {
     sim.diagT = sim.time;   // chwila, z której pochodzi kopia pól (odczyt dociera później – w trybie MAX nawet godzinę symulacji)
     enc.clearBuffer(statsBuf);
     const pass = enc.beginComputePass();
-    for (const k of [statsPipe, meansPipe]) {
+    const diagPipes = sim.probe ? [probePipe, statsPipe, meansPipe] : [statsPipe, meansPipe];
+    for (const k of diagPipes) {
       pass.setPipeline(k.p);
       pass.setBindGroup(0, simBG, [0]);
       pass.dispatchWorkgroups(k.g[0], k.g[1]);
@@ -1419,26 +1461,24 @@ async function init() {
     enc.copyBufferToBuffer(workBuf, W_MUV * 4, diagRead, MUV_OFF, 8 * NZ);
     enc.copyBufferToBuffer(sfcBuf, 0, diagRead, STATS_BYTES + 16 * NZ, NSF * NXY * 4);
     if (sim.probe) {
-      const col = sim.probe.j * NX + sim.probe.i;
-      const offs = [0, N, T_OFF, QV_OFF, QV_OFF + N, QV_OFF + 2 * N, QV_OFF + 3 * N];   // u, v, θ', qv, qc, qi, qr
-      offs.forEach((o, f) => {
-        for (let k = 0; k < NZ; k++) enc.copyBufferToBuffer(stateBuf, (o + k * NXY + col) * 4, diagRead, PROBE_OFF + (f * NZ + k) * 4, 4);
-      });
-      for (let k = 0; k <= NZ; k++) enc.copyBufferToBuffer(stateBuf, (2 * N + k * NXY + col) * 4, diagRead, PROBE_OFF + (7 * NZ + k) * 4, 4);
-      sim.probeEnc = col;
+      enc.copyBufferToBuffer(workBuf, W_PROBE * 4, diagRead, PROBE_OFF, PROBE_N * 4);
+      sim.probeEnc = sim.probe.j * NX + sim.probe.i;
     } else sim.probeEnc = -1;
-    // powietrze modelu na wysokości stacji położonych wyżej niż grunt modelu w oczku (stations.js reading)
+    // powietrze modelu na wysokości stacji – tylko gdy widać panel stacji (kosztowne copyBufferToBuffer)
     let req = [];
-    try { req = stations.airReq().slice(0, ST_AIR); } catch { req = []; }
-    req.forEach((q, n) => {
-      let la = sim.kb[q.col];
-      while (la + 1 < NZ - 1 && grid.zc[la + 1] <= q.zs) la++;
-      q.la = la; q.lb = Math.min(la + 1, NZ - 1);
-      [q.la, q.lb].forEach((k, m) => {
-        const c = k * NXY + q.col, o = ST_AIR_OFF + (12 * n + 6 * m) * 4;
-        [T_OFF + c, QV_OFF + c, c, c + 1, N + c, N + c + NX].forEach((src, f) => enc.copyBufferToBuffer(stateBuf, src * 4, diagRead, o + f * 4, 4));
+    const stVis = typeof curAna === 'function' && curAna() === 'st' && !document.body.classList.contains('noana');
+    if (stVis) {
+      try { req = stations.airReq().slice(0, ST_AIR); } catch { req = []; }
+      req.forEach((q, n) => {
+        let la = sim.kb[q.col];
+        while (la + 1 < NZ - 1 && grid.zc[la + 1] <= q.zs) la++;
+        q.la = la; q.lb = Math.min(la + 1, NZ - 1);
+        [q.la, q.lb].forEach((k, m) => {
+          const c = k * NXY + q.col, o = ST_AIR_OFF + (12 * n + 6 * m) * 4;
+          [T_OFF + c, QV_OFF + c, c, c + 1, N + c, N + c + NX].forEach((src, f) => enc.copyBufferToBuffer(stateBuf, src * 4, diagRead, o + f * 4, 4));
+        });
       });
-    });
+    }
     sim.stReqEnc = req;
   }
 
@@ -1515,13 +1555,14 @@ async function init() {
   function encodeRender(enc) {
     const ck = clock(sim.time);
     const sun = sunVector(num('lat'), ck.doy, ck.hour);
+    const cscale = canvasScale(perfState.quality, v3.on);
     for (const v of views) {
       if (v.mode === 0 && v3.on) {
-        resizeCanvas(v.canvas, 0.6);              // widok 3D w mniejszej rozdzielczości (wygładza przeglądarka)
+        resizeCanvas(v.canvas, cscale);              // widok 3D w mniejszej rozdzielczości (wygładza przeglądarka)
         encode3D(enc, v);
         continue;
       }
-      resizeCanvas(v.canvas);
+      resizeCanvas(v.canvas, cscale);
       const r = viewRange(v);
       v.range = r;
       const ab = new ArrayBuffer(VIEW_BYTES);
@@ -1582,26 +1623,34 @@ async function init() {
       v3.lastT = sim.time; v3.lastWall = wall;
       device.queue.writeBuffer(volP, 0, ab);
     }
-    enc.copyTextureToTexture({ texture: densTex }, { texture: densPrev }, [NXD, NYD, NZ]);
-    const tsOn = ts3 && !ts3.pending && !ts3.armed;
+    const vs = volStride(perfState.quality);
+    const doVol = ((v3.volTick = (v3.volTick ?? 0) + 1) % vs) === 0;
+    const tsOn = ts3 && !ts3.pending && !ts3.armed && doVol;
     const tw = (a) => (tsOn ? { timestampWrites: { querySet: ts3.qs, beginningOfPassWriteIndex: a, endOfPassWriteIndex: a + 1 } } : {});
-    const pass = enc.beginComputePass(tw(0));
     const wg = [Math.ceil(NXD / 4), Math.ceil(NYD / 4), Math.ceil(NZ / 4)];
-    pass.setPipeline(pGround); pass.setBindGroup(0, bGround); pass.dispatchWorkgroups(Math.ceil(NXD / 8), Math.ceil(NYD / 8));
-    pass.setPipeline(pVol); pass.setBindGroup(0, bVol); pass.dispatchWorkgroups(...wg);
-    pass.end();
-    const pass2 = enc.beginComputePass(tw(2));
-    pass2.setPipeline(pLight); pass2.setBindGroup(0, bLight); pass2.dispatchWorkgroups(...wg);
-    if (v3.newView) {
-      // profil średni domeny co klatkę, tablice nieba co 16 klatek (zależą tylko od profilu aerozolu)
-      pass2.setPipeline(pStats); pass2.setBindGroup(0, bStats); pass2.dispatchWorkgroups(NZ + 1);
-      if ((v3.lutN = ((v3.lutN ?? -1) + 1) % 16) === 0) {
-        pass2.setPipeline(pTrans); pass2.setBindGroup(0, bTrans); pass2.dispatchWorkgroups(32, 8);
-        pass2.setPipeline(pMS); pass2.setBindGroup(0, bMS); pass2.dispatchWorkgroups(4, 4);
-        pass2.setPipeline(pIrr); pass2.setBindGroup(0, bIrr); pass2.dispatchWorkgroups(4, 4);
+    if (doVol) {
+      enc.copyTextureToTexture({ texture: densTex }, { texture: densPrev }, [NXD, NYD, NZ]);
+      const pass = enc.beginComputePass(tw(0));
+      pass.setPipeline(pGround); pass.setBindGroup(0, bGround); pass.dispatchWorkgroups(Math.ceil(NXD / 8), Math.ceil(NYD / 8));
+      pass.setPipeline(pVol); pass.setBindGroup(0, bVol); pass.dispatchWorkgroups(...wg);
+      pass.end();
+      const pass2 = enc.beginComputePass(tw(2));
+      pass2.setPipeline(pLight); pass2.setBindGroup(0, bLight); pass2.dispatchWorkgroups(...wg);
+      if (v3.newView) {
+        // profil średni domeny co klatkę, tablice nieba co 16 klatek (zależą tylko od profilu aerozolu)
+        pass2.setPipeline(pStats); pass2.setBindGroup(0, bStats); pass2.dispatchWorkgroups(NZ + 1);
+        if ((v3.lutN = ((v3.lutN ?? -1) + 1) % 16) === 0) {
+          pass2.setPipeline(pTrans); pass2.setBindGroup(0, bTrans); pass2.dispatchWorkgroups(32, 8);
+          pass2.setPipeline(pMS); pass2.setBindGroup(0, bMS); pass2.dispatchWorkgroups(4, 4);
+          pass2.setPipeline(pIrr); pass2.setBindGroup(0, bIrr); pass2.dispatchWorkgroups(4, 4);
+        }
       }
+      pass2.end();
+    } else if (v3.newView) {
+      const pass2 = enc.beginComputePass();
+      pass2.setPipeline(pStats); pass2.setBindGroup(0, bStats); pass2.dispatchWorkgroups(NZ + 1);
+      pass2.end();
     }
-    pass2.end();
     // kamera: orbita wokół środka domeny albo wolny lot (skala 1:1)
     const F = v3.fly;
     // nowy widok: skala 1:1, przewyższenie tylko z suwaka; stary: automatyczne (L/80 km, 1–8) × suwak
@@ -3722,7 +3771,7 @@ async function init() {
     // czas jąder jednego kroku na GPU (znaczniki czasu) [ms], suma po nazwie
     async kprofile(reps = 20) {
       if (!ts) return null;
-      const seq = sim.flat ? seqFlat : seqTerrain, n = seq.length;
+      const seq = sim.flat ? seqFlat : terrainSeq(), n = seq.length;
       const qs = device.createQuerySet({ type: 'timestamp', count: 2 * n });
       const res = buf(16 * n, U.QUERY_RESOLVE | U.COPY_SRC, 'kpRes'), rd = buf(16 * n, U.MAP_READ | U.COPY_DST, 'kpRead');
       const tot = {};
@@ -4867,9 +4916,12 @@ async function init() {
       }
     }
   }
+  let frameMsEma = 0;
   function frame(now) {
     if (sim.halted) return;
     const realDt = Math.min((now - last) / 1000, 0.1);
+    const frameMs = last ? (now - last) : 16;
+    frameMsEma = frameMsEma ? 0.9 * frameMsEma + 0.1 * frameMs : frameMs;
     last = now;
     flyTick(realDt);
 
@@ -4887,19 +4939,21 @@ async function init() {
       $('hillsV').textContent = fmH(sim.hmax);
     }
 
+    const q = perfState.quality;
+    const maxSteps = maxStepsFor(q);
     let n = 0;
     if (!sim.paused) {
       const mode = $('speed').value;
       if (mode === 'max') {
-        // ~28 ms obliczeń na klatkę (~30 kl./s – widok płynny, karta prawie w pełni dla symulacji); co najmniej 1 krok
-        n = sim.msPerStep > 0 ? Math.max(1, Math.floor(28 / sim.msPerStep)) : 2;
+        const budget = frameBudgetMs(q, v3.on, frameMsEma);
+        n = sim.msPerStep > 0 ? Math.max(1, Math.floor(budget / sim.msPerStep)) : 2;
       } else {
         sim.debt += realDt * Number(mode) / DT;
         n = Math.floor(sim.debt);
         sim.debt -= n;
         if (sim.debt > 1) sim.debt = 0;
       }
-      n = Math.max(0, Math.min(MAX_STEPS, n));
+      n = Math.max(0, Math.min(maxSteps, n));
     }
 
     if (sim.busy || sim.saving) n = 0;
@@ -4910,15 +4964,17 @@ async function init() {
     cuTick(n * DT, realDt);
     const enc = device.createCommandEncoder();
     let wantDiag = false;
-    if (!sim.busy && !sim.statsPending && now - sim.lastStats > 400) {
+    const diagIv = diagIntervalMs(q, NXY);
+    if (!sim.busy && !sim.statsPending && now - sim.lastStats > diagIv) {
       writeParams(1);   // aktualne ustawienia widoku dla diagnostyki (także podczas pauzy)
       encodeDiag(enc);
       wantDiag = true;
       sim.lastStats = now;
     }
-    encodeRender(enc);
+    const hidden = document.hidden;
+    if (!hidden) encodeRender(enc);
     device.queue.submit([enc.finish()]);
-    ts3Map();
+    if (!hidden) ts3Map();
     if (wantDiag) readDiag();
     if (sim.snapReq) { sim.snapReq = false; snapshot(); }
     weatherTick();
@@ -4993,6 +5049,8 @@ async function init() {
       $('chipGpu').textContent = sim.msPerStep ? `${sim.msPerStep.toFixed(1)} ms/step` : '–';
       fitChips();
       $('perf').textContent = [
+        `quality          ${perfState.mode} → ${perfState.quality} · CG ${perfState.cg}${sim.flat ? '' : ' (terrain)'} · frame ${frameMsEma.toFixed(0)} ms`,
+        `GPU              ${perfState.label} (${perfState.tier}${perfState.reason ? ', ' + perfState.reason : ''})`,
         `speed            ${simPerReal.toFixed(0)}×, one day = ${isFinite(dayMin) ? dayMin.toFixed(1) + ' min' : '—'}`,
         `GPU per step     ${sim.msPerStep ? sim.msPerStep.toFixed(2) + ' ms' : '—'}${ts ? '' : ' (est.)'}${sim.flat ? '' : ' (terrain)'}`,
         v3.on && ts3 ? `3D view          ${(ts3.tex + ts3.img).toFixed(2)} ms per frame (textures ${ts3.tex.toFixed(2)}, image ${ts3.img.toFixed(2)}; ${v3.newView ? 'new' : 'old'})` : '',
@@ -5002,6 +5060,18 @@ async function init() {
         st ? `q_c max          ${(1000 * st[12]).toFixed(2)} g/kg` : '',
         st ? `error ∇·(ρu)/ρ   ${st[4].toExponential(1)} 1/s` : '',
       ].filter(Boolean).join('\n');
+  }
+
+  // Settings → Performance: jakość
+  const qSeg = $('qualitySeg');
+  if (qSeg) {
+    for (const q of QUALITY_MODES) {
+      const b = document.createElement('button');
+      b.dataset.q = q.id; b.textContent = q.name; b.title = q.hint;
+      b.onclick = () => applyQuality(q.id);
+      qSeg.appendChild(b);
+    }
+    applyQuality();
   }
 }
 

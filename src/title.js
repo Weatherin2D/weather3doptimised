@@ -5,15 +5,21 @@ import { NICE_DX, RES_OPTS, planGrid } from './gridplan.js';
 import { openRun, stashRun, resumeUrl } from './runfile.js';
 import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, manipQuery } from './manip.js';
 import { toD, fromD, unitD, fmDx, isImp, setImp, onUnits } from './units.js';
+import {
+  QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync,
+  costFactor, recommendNz, recommendRes,
+} from './perf.js';
 
 const $ = (id) => document.getElementById(id);
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const SIZES = [25, 50, 100, 250, 500, 1000, 2000];
 const KM_DEG = 111.32;
-const st = { lat: 50.06, lon: 19.94, lx: 500, ly: 500, res: 100, dx: 'auto', month: 5 };
+const st = { lat: 50.06, lon: 19.94, lx: 500, ly: 500, res: 100, dx: 'auto', month: 5, quality: loadQualityMode() };
 try { Object.assign(st, JSON.parse(localStorage.getItem('w3d-title') || '{}')); } catch { /* bez pamięci przeglądarki – domyślne */ }
+if (!QUALITY_MODES.some((q) => q.id === st.quality)) st.quality = loadQualityMode();
 const savePref = () => { try { localStorage.setItem('w3d-title', JSON.stringify(st)); } catch { /* bez pamięci */ } };
 const plan = () => planGrid(st.lx, st.ly, st.res, st.dx);
+const gpu = { tier: 'mid', label: 'WebGPU', reason: '' };
 
 $('loadScr').classList.remove('on');
 $('titleScr').classList.add('on');
@@ -30,6 +36,12 @@ for (const r of RES_OPTS) {
   b.textContent = r; b.dataset.r = r;
   b.onclick = () => { st.res = r; ui(); };
   $('ttRes').appendChild(b);
+}
+for (const q of QUALITY_MODES) {
+  const b = document.createElement('button');
+  b.textContent = q.name; b.dataset.q = q.id; b.title = q.hint;
+  b.onclick = () => { st.quality = q.id; saveQualityMode(q.id); ui(); };
+  $('ttQuality').appendChild(b);
 }
 $('ttDx').add(new Option('automatic (from the detail)', 'auto'));
 for (const d of NICE_DX) $('ttDx').add(new Option('', d));
@@ -64,11 +76,21 @@ function ui() {
   for (const b of $('ttUnits').children) b.classList.toggle('on', (b.dataset.u === 'imperial') === isImp());
   for (const b of $('ttSizes').children) b.classList.toggle('on', +b.dataset.km === Math.round(st.lx) && +b.dataset.km === Math.round(st.ly));
   for (const b of $('ttRes').children) b.classList.toggle('on', +b.dataset.r === st.res);
+  for (const b of $('ttQuality').children) b.classList.toggle('on', b.dataset.q === st.quality);
   for (const b of $('ttMonths').children) b.classList.toggle('on', +b.dataset.m === st.month);
   $('ttDx').value = String(st.dx);
-  const sp = fmDx(g.dx), secs = 30 * g.cost;
+  const sp = fmDx(g.dx), secs = 30 * g.cost * costFactor(gpu.tier);
+  const nzRec = recommendNz(gpu.tier, g.nx, g.ny, st.quality);
+  const resRec = recommendRes(gpu.tier, st.quality);
+  let warn = '';
+  if (st.res > resRec) warn += ` · detail ${st.res} is heavy for this GPU (≤ ${resRec} recommended)`;
+  if (nzRec) warn += ` · start will use ${nzRec} vertical levels (default 50)`;
   $('ttInfo').innerHTML = `Grid spacing <b>${sp}</b> · <b>${g.nx} × ${g.ny}</b> cells · map <b>${Math.round(toD(g.nx * g.dx / 1000, 'km'))} × ${Math.round(toD(g.ny * g.dx / 1000, 'km'))} ${uKm}</b><br>`
-    + `${g.sc.name[0].toUpperCase()}${g.sc.name.slice(1)}: ${g.sc.use}<br>One day at max speed ≈ <b${secs > 45 ? ' style="color:var(--warn)"' : ''}>${secs < 100 ? secs.toFixed(0) : Math.round(secs / 10) * 10} s</b> (RTX 5060 Ti)`;
+    + `${g.sc.name[0].toUpperCase()}${g.sc.name.slice(1)}: ${g.sc.use}<br>`
+    + `GPU: <b>${gpu.label}</b> (${gpu.tier}${gpu.reason ? ', ' + gpu.reason : ''}) · quality <b>${st.quality}</b><br>`
+    + `One day at max speed ≈ <b${secs > 45 ? ' style="color:var(--warn)"' : ''}>${secs < 100 ? secs.toFixed(0) : Math.round(secs / 10) * 10} s</b>`
+    + (gpu.tier === 'high' ? ' (scaled from RTX 5060 Ti)' : ' (estimate for this GPU)')
+    + (warn ? `<br><span style="color:var(--warn)">${warn.slice(3)}</span>` : '');
   $('ttPlace').textContent = fmtLL(st.lat, st.lon);
   savePref();
   drawReq();
@@ -253,9 +275,12 @@ new ResizeObserver(drawReq).observe(cv);
 // ---------- start: adres z wyborem bez przeładowania, potem wczytanie symulacji (main.js dokończy: klimat, teren, model) ----------
 async function start(place) {
   const g = plan();
+  saveQualityMode(st.quality);
   savePref();
   const a = place ? `${st.lat.toFixed(3)},${st.lon.toFixed(3)},${st.month}` : `,,${st.month}`;
-  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}&start=${a}${manipQuery(manT(), manR(), manV())}`);
+  const nz = recommendNz(gpu.tier, g.nx, g.ny, st.quality);
+  const nzQ = nz ? `&nz=${nz}` : '';
+  history.replaceState(null, '', `${location.pathname}?dx=${g.dx}&nx=${g.nx}&ny=${g.ny}${nzQ}&start=${a}${manipQuery(manT(), manR(), manV())}`);
   $('titleScr').classList.remove('on');
   $('loadScr').classList.add('on');
   await import('./main.js');
@@ -284,3 +309,13 @@ fitView();
 // czcionka dojdzie po pierwszym rysowaniu – podpis wymiarów
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawReq);
 drawReq();
+// wykryj kartę (do kosztu doby i rekomendacji NZ / szczegółowości)
+(async () => {
+  try {
+    if (!navigator.gpu) return;
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) return;
+    Object.assign(gpu, await detectGpuTierAsync(adapter));
+    ui();
+  } catch { /* brak WebGPU na stronie tytułowej – zostaje mid */ }
+})();

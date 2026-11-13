@@ -50,8 +50,8 @@ struct Params {
   tanom: f32,        // anomalia temperatury masy powietrza dużej skali [K] (suwak w zakładce Pogoda)
   ddecl: f32,        // zmiana deklinacji słońca [rad/dobę] (> 0: na półkuli N dzień się wydłuża) – fenologia
   rainF: f32,        // manipulacja atmosfery: mnożnik opadu (1 – bez zmian)
-  _r1: f32,
-  _r2: f32,
+  probeI: u32,       // kolumna sondy (i, j) – diagnostyka spakowana do work[W_PROBE…]
+  probeJ: u32,
 }
 
 // Szerokość geograficzna wiersza j [rad] (duże mapy: kilkanaście stopni różnicy N–S)
@@ -4462,6 +4462,21 @@ fn stats_k(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) n
   if (li < 16u) {
     if (li == 14u) { atomicAdd(&stats[li], atomicLoad(&wgs[li])); }
     else { atomicMax(&stats[li], atomicLoad(&wgs[li])); }
+  }
+}
+
+// Pakuje kolumnę sondy do work[W_PROBE…]: 7 pól × NZ + w na NZ+1 ścianach (jeden odczyt zamiast wielu copyBufferToBuffer)
+@compute @workgroup_size(WG)
+fn diag_probe(@builtin(local_invocation_index) li: u32) {
+  let col = P.probeJ * NX + P.probeI;
+  let offs = array<u32, 7>(U_OFF, V_OFF, T_OFF, QV_OFF, QC_OFF, QI_OFF, QR_OFF);
+  for (var f = 0u; f < 7u; f++) {
+    for (var k = li; k < NZ; k += WG) {
+      work[W_PROBE + f * NZ + k] = state[offs[f] + k * NXY + col];
+    }
+  }
+  for (var k = li; k <= NZ; k += WG) {
+    work[W_PROBE + 7u * NZ + k] = state[W_OFF + k * NXY + col];
   }
 }
 

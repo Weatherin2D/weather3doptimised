@@ -10,6 +10,10 @@ Now you can check out the simulation for yourself. It's still in its early form,
 
 You need a current Chrome or Edge on a computer with a WebGPU graphics card; it will not work on phones. All the computing happens on your PC, so the simulation speed will depend on your card. On my RTX 5060 Ti, a simulated day on a 500 × 500 km map takes about 20 s at maximum speed. Starting takes a minute or so.
 
+### Performance on weaker GPUs
+
+Settings → Performance (and the start page) offer quality modes: **Auto**, **Smooth**, **Balanced**, **Fidelity**. On large grids and low-end / integrated GPUs the simulation uses fewer conjugate-gradient iterations, a shorter frame-time step budget, rarer surface readbacks, packed probe diagnostics, lower map and 3D pixel density, and (from the title screen) an optional reduction of vertical levels. Pick **Smooth** if the UI feels sticky; **Fidelity** keeps the full solver on strong discrete cards.
+
 <table>
   <tr>
     <td width="50%"><img src="docs/satellite.png" alt="Simulated clouds over Poland, seen as a satellite image"></td>

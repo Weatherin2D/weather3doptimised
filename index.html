@@ -216,6 +216,10 @@
     .tt-side { width: 384px; flex: none; background: var(--panel); border-radius: var(--radius); padding: 7px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
     #ttRes { display: flex; }
     #ttRes button { flex: 1; padding: 5px 2px; }
+    #ttQuality { display: flex; flex-wrap: wrap; }
+    #ttQuality button { flex: 1; min-width: 0; padding: 5px 4px; }
+    #qualitySeg { display: flex; flex-wrap: wrap; }
+    #qualitySeg button { flex: 1; min-width: 0; padding: 5px 6px; }
     .ttman { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-top: 4px; }
     .ttman span { width: 84px; flex: none; }
     .ttman input { flex: 1; min-width: 0; }
@@ -461,6 +465,7 @@
           <div class="synopts" id="ttSizes"></div>
           <label><span class="lbl">Detail (cells on the longer side; more = slower)</span><div class="seg" id="ttRes"></div></label>
           <label><span class="lbl">Grid spacing</span><select id="ttDx"></select></label>
+          <label><span class="lbl">Performance</span><div class="seg" id="ttQuality"></div></label>
           <div class="hint" id="ttInfo"></div>
         </div>
         <div class="box">
@@ -721,6 +726,11 @@
             <option value="per">Periodic – what leaves on one side comes back on the other</option></select></label>
           <div class="hint" id="gridInfo"></div>
           <div class="btns"><button id="gridApply" class="btn primary">Apply grid (reloads the page)</button></div>
+        </div>
+        <div class="box">
+          <h4>Performance</h4>
+          <div class="seg" id="qualitySeg" title="Trade a little solver fidelity and UI freshness for smoother frames on weaker GPUs"></div>
+          <div class="hint" id="qualityInfo">–</div>
         </div>
         <div class="box">
           <h4>Map overlays</h4>

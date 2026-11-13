@@ -336,6 +336,7 @@ export function wgslHeader(c, grid) {
     `const W_MUV: u32 = W_EBM + 2u * MEB;`,
     // średni po domenie strumień ciepła z gruntu, średnia wykładnicza z doby [W/m²]
     `const W_HM: u32 = W_MUV + 2u * NZ;`,
+    `const W_PROBE: u32 = W_HM + 8u;`,
   ];
   SFC.forEach((name, i) => lines.push(`const S_${name}: u32 = ${i}u;`));
   for (const [k, v] of Object.entries(grid.off)) lines.push(`const VG_${k}: u32 = ${v}u;`);
