@@ -115,14 +115,17 @@ export function shapeFromImage(img, cfg, blendEdges = true) {
 // Pędzel: dodaje (lub odejmuje) gładki "kopczyk" o promieniu r [komórki] w punkcie (x, y) [komórki]
 export function paintBrush(h, cfg, x, y, r, amount, hmax, wrap = true) {
   const { NX, NY } = cfg;
-  const R = Math.ceil(2 * r);
+  const R = Math.ceil(2 * r), r2 = r * r || 1, invR2 = 1 / r2, r2out = r2 * 4;
   for (let dj = -R; dj <= R; dj++) {
     for (let di = -R; di <= R; di++) {
       const ii = Math.floor(x) + di, jj = Math.floor(y) + dj;
       if (!wrap && (ii < 0 || jj < 0 || ii >= NX || jj >= NY)) continue;
-      const i = (ii % NX + NX) % NX, j = (jj % NY + NY) % NY;
       const dx = Math.floor(x) + di + 0.5 - x, dy = Math.floor(y) + dj + 0.5 - y;
-      const wgt = Math.exp(-(dx * dx + dy * dy) / (r * r));
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2out) continue;
+      const wgt = Math.exp(-d2 * invR2);
+      if (wgt < 0.02) continue;
+      const i = (ii % NX + NX) % NX, j = (jj % NY + NY) % NY;
       const c = j * NX + i;
       h[c] = Math.min(hmax, Math.max(0, h[c] + amount * wgt));
     }

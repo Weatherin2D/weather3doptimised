@@ -450,27 +450,40 @@ async function init() {
   // woda: teren poniżej poziomu morza (wysokość liczona od poziomu morza) + malowana maska
   // (sim.wmask: 1 – woda, −1 – ląd mimo poziomu morza)
   const isWaterV = (c) => (sim.wmask && sim.wmask[c] === 1) || (sim.hv[c] < num('sea') && !(sim.wmask && sim.wmask[c] === -1));
+  let seaHsBuf = null;
   const seaHeights = () => {
-    const sea = num('sea');
-    return Float32Array.from(sim.hv, (h) => Math.max(h - sea, 0));
+    const sea = num('sea'), n = sim.hv.length;
+    if (!seaHsBuf || seaHsBuf.length !== n) seaHsBuf = new Float32Array(n);
+    for (let c = 0; c < n; c++) seaHsBuf[c] = Math.max(sim.hv[c] - sea, 0);
+    return seaHsBuf;
   };
   // miejscowości na mapie (OpenStreetMap) – właściwa funkcja przypisana po utworzeniu stacji; wołane przy każdej zmianie terenu,
   // pobiera tylko przy zmianie miejsca / rozmiaru mapy
   let refreshCities = () => {};
-  function applyTerrain() {
+  // light: skip flowNet + cities — used while the brush is down so painting stays smooth
+  // heightsOnly: upload HGT only (live height paint); full derive + drainage on flushPaintTerrain
+  function applyTerrain({ light = false, heightsOnly = false } = {}) {
     sim.hs = seaHeights();
     sim.h = embed(sim.hs);
+    if (heightsOnly) {
+      device.queue.writeBuffer(vgBuf, grid.off.HGT * 4, sim.h);
+      let hmax = 0;
+      for (let c = 0; c < sim.hv.length; c++) if (sim.hv[c] > hmax) hmax = sim.hv[c];
+      sim.hmax = hmax;
+      sim.flat = hmax <= 0;
+      return;
+    }
     const t = deriveTerrain(sim.h, CFG, new URLSearchParams(location.search).get('pc') !== '0');
     device.queue.writeBuffer(vgBuf, grid.off.KB * 4, t.kb);
     device.queue.writeBuffer(vgBuf, grid.off.HF * 4, t.hf);
     device.queue.writeBuffer(vgBuf, grid.off.HGT * 4, sim.h);
     device.queue.writeBuffer(vgBuf, grid.off.SLX * 4, t.slx);
     device.queue.writeBuffer(vgBuf, grid.off.SLY * 4, t.sly);
-    device.queue.writeBuffer(vgBuf, grid.off.RCV * 4, flowNet());
+    if (!light) device.queue.writeBuffer(vgBuf, grid.off.RCV * 4, flowNet());
     sim.flat = t.flat;
     sim.hmax = t.hmax;
     sim.kb = t.kb;
-    refreshCities();
+    if (!light) refreshCities();
   }
   // Sieć spływu D8 na terenie z wypełnionymi zagłębieniami (priority-flood, Barnes 2014): ujścia to brzeg
   // siatki obliczeniowej (−2: woda opuszcza domenę) i woda (jeziora, morze; −1); każde inne oczko oddaje
@@ -534,7 +547,8 @@ async function init() {
   }
 
   // pokrycie terenu (klasy) i początkowa wilgotność gleby w kolumnach
-  function applyLand() {
+  // light: skip flowNet (drainage) — brush strokes call this; pointer-up flushes full
+  function applyLand({ light = false } = {}) {
     const lv = makeLand($('landuse').value, CFGV, sim.seed, num('soil') / 100, sim.hs || sim.hv);
     for (let c = 0; c < NXV * NYV; c++) {
       if (isWaterV(c)) lv.cls[c] = 3;
@@ -556,10 +570,10 @@ async function init() {
       if (veg[c] === VEG.STEPPE) sim.land.w[c] = Math.min(sim.land.w[c], 0.3);
     }
     sim.veg = veg;
-    if (sim.lcHi) { clearTimeout(sim.vegHiT); sim.vegHiT = setTimeout(buildVegHi, 300); }
+    if (sim.lcHi && !light) { clearTimeout(sim.vegHiT); sim.vegHiT = setTimeout(buildVegHi, 300); }
     device.queue.writeBuffer(vgBuf, grid.off.LAND * 4, sim.land.cls);
     device.queue.writeBuffer(vgBuf, grid.off.VEG * 4, veg);
-    device.queue.writeBuffer(vgBuf, grid.off.RCV * 4, flowNet());     // ujścia do jezior i morza
+    if (!light) device.queue.writeBuffer(vgBuf, grid.off.RCV * 4, flowNet());     // ujścia do jezior i morza
   }
   function setShape(kind) {
     if (kind === 'image' || kind === 'painted' || kind === 'dem' || kind === 'world') return;
@@ -630,11 +644,75 @@ async function init() {
     }
     return sim.world;
   }
+  const WORLD_VEG_CLS = { [VEG.DECID]: 1, [VEG.TAIGA]: 1, [VEG.RAINFOREST]: 1, [VEG.SCLERO]: 1, [VEG.URBAN]: 2 };
+  function ensureWorldMasks() {
+    const n = NXV * NYV;
+    if (!sim.wmask || sim.wmask.length !== n) sim.wmask = new Int8Array(n);
+    if (!sim.lmask || sim.lmask.length !== n) sim.lmask = new Int8Array(n).fill(-1);
+    if (!sim.vmask || sim.vmask.length !== n) sim.vmask = new Int8Array(n).fill(-1);
+  }
+  // Fast brush-region sync for live painting (no flowNet / full land rebuild).
+  function syncWorldBrushVisual(x, y, r) {
+    const w = ensureWorld();
+    ensureWorldMasks();
+    const R = Math.ceil(r) + 1, r2 = (r + 1) * (r + 1);
+    let hmax = sim.hmax || 0;
+    for (let dj = -R; dj <= R; dj++) {
+      for (let di = -R; di <= R; di++) {
+        if (di * di + dj * dj > r2) continue;
+        const ii = Math.floor(x) + di, jj = Math.floor(y) + dj;
+        if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
+        const c = jj * NXV + ii;
+        const water = w.sea[c] || w.lake[c];
+        const h = water ? 0 : Math.max(0, w.h[c]);
+        sim.hv[c] = h;
+        if (h > hmax) hmax = h;
+        sim.wmask[c] = water ? 1 : -1;
+        if (w.veg[c] >= 0 && !water) {
+          sim.vmask[c] = w.veg[c];
+          sim.lmask[c] = WORLD_VEG_CLS[w.veg[c]] ?? 0;
+        } else {
+          sim.vmask[c] = -1;
+          sim.lmask[c] = -1;
+        }
+        if (sim.land) {
+          const cc = jj * NX + ii;
+          if (water) {
+            sim.land.cls[cc] = 3;
+          } else {
+            if (sim.land.cls[cc] === 3) sim.land.cls[cc] = sim.lmask[c] >= 0 ? sim.lmask[c] : 0;
+            else if (sim.lmask[c] >= 0) sim.land.cls[cc] = sim.lmask[c];
+            sim.land.w[cc] = w.soil[c];
+            if (sim.vmask[c] >= 0) sim.veg[cc] = sim.vmask[c];
+            else if (sim.veg) sim.veg[cc] = biome(sim.land.cls[cc], latRow(cc), num('cont'), num('hum'), h, cellRnd(cc));
+          }
+        }
+      }
+    }
+    sim.hmax = hmax;
+    $('shape').value = 'world';
+    sim.worldOn = true;
+    applyTerrain({ heightsOnly: true });
+    if (sim.land) {
+      device.queue.writeBuffer(vgBuf, grid.off.LAND * 4, sim.land.cls);
+      if (sim.veg) device.queue.writeBuffer(vgBuf, grid.off.VEG * 4, sim.veg);
+    }
+    sim.paintNeedsFlush = true;
+  }
+  function flushPaintTerrain() {
+    if (!sim.paintNeedsFlush) return;
+    sim.paintNeedsFlush = false;
+    if (sim.worldOn && sim.world) applyWorldToSim();
+    else { applyTerrain(); applyLand(); }
+    $('hills').value = String(Math.round(sim.hmax / 50) * 50 || 0);
+    if ($('hillsV')) $('hillsV').textContent = fmH(sim.hmax);
+    worldHint();
+  }
   function applyWorldToSim() {
     const w = ensureWorld();
-    sim.wmask = new Int8Array(NXV * NYV);
-    sim.lmask = new Int8Array(NXV * NYV).fill(-1);
-    sim.vmask = new Int8Array(NXV * NYV).fill(-1);
+    ensureWorldMasks();
+    sim.lmask.fill(-1);
+    sim.vmask.fill(-1);
     let hmax = 0, soilSum = 0, soilN = 0;
     for (let c = 0; c < NXV * NYV; c++) {
       const water = w.sea[c] || w.lake[c];
@@ -644,8 +722,7 @@ async function init() {
       else { sim.wmask[c] = -1; soilSum += w.soil[c]; soilN++; }
       if (w.veg[c] >= 0 && !water) {
         sim.vmask[c] = w.veg[c];
-        const VEG_CLS = { [VEG.DECID]: 1, [VEG.TAIGA]: 1, [VEG.RAINFOREST]: 1, [VEG.SCLERO]: 1, [VEG.URBAN]: 2 };
-        sim.lmask[c] = VEG_CLS[w.veg[c]] ?? 0;
+        sim.lmask[c] = WORLD_VEG_CLS[w.veg[c]] ?? 0;
       }
     }
     $('shape').value = 'world';
@@ -665,6 +742,7 @@ async function init() {
       }
     }
     worldHint();
+    sim.paintNeedsFlush = false;
   }
   function enableCustomWorld(preset = 'island', seed = 1 + Math.floor(Math.random() * 1e9)) {
     const w = ensureWorld(seed);
@@ -3216,23 +3294,44 @@ async function init() {
   $('fieldH').addEventListener('change', () => { monUi(); monShow(); });
   $('sea').addEventListener('change', () => { applyTerrain(); applyLand(); reset(); });
   // malowanie wody na żywo: klasa podłoża, roślinność i temperatura powierzchni w zmienionych kolumnach
-  function paintWater(x, y, r, add) {
+  function paintWater(x, y, r, add, { light = false } = {}) {
     if (!sim.wmask) sim.wmask = new Int8Array(NXV * NYV);
     const changed = [];
+    const r2 = r * r;
     for (let j = Math.max(0, Math.floor(y - r)); j <= Math.min(NYV - 1, Math.ceil(y + r)); j++) {
       for (let i = Math.max(0, Math.floor(x - r)); i <= Math.min(NXV - 1, Math.ceil(x + r)); i++) {
-        if (Math.hypot(i + 0.5 - x, j + 0.5 - y) > r) continue;
+        const dx = i + 0.5 - x, dy = j + 0.5 - y;
+        if (dx * dx + dy * dy > r2) continue;
         const c = j * NXV + i, was = isWaterV(c);
         sim.wmask[c] = add ? 1 : -1;
         if (isWaterV(c) !== was) changed.push(j * NX + i);
       }
     }
     if (!changed.length) return;
-    applyTerrain();
-    applyLand();
+    if (light && sim.land) {
+      for (const cc of changed) {
+        const vi = cc % NX, vj = Math.floor(cc / NX), vc = vj * NXV + vi;
+        if (isWaterV(vc)) {
+          sim.land.cls[cc] = 3;
+        } else {
+          sim.land.cls[cc] = (sim.lmask && sim.lmask[vc] >= 0) ? sim.lmask[vc] : 0;
+          if (sim.veg) sim.veg[cc] = (sim.vmask && sim.vmask[vc] >= 0) ? sim.vmask[vc]
+            : biome(sim.land.cls[cc], latRow(cc), num('cont'), num('hum'), sim.hv[vc], cellRnd(cc));
+        }
+      }
+      applyTerrain({ heightsOnly: true });
+      device.queue.writeBuffer(vgBuf, grid.off.LAND * 4, sim.land.cls);
+      if (sim.veg) device.queue.writeBuffer(vgBuf, grid.off.VEG * 4, sim.veg);
+      sim.paintNeedsFlush = true;
+    } else {
+      applyTerrain({ light });
+      applyLand({ light });
+      if (light) sim.paintNeedsFlush = true;
+    }
+    if (!sim.sfc) return;
     const tw = num('water') + 273.15;
     for (const c of changed) {
-      const t = sim.land.cls[c] === 3 ? tw : (sim.sfc ? sim.sfc[S.T2 * NXY + c] + 273.15 : tw);
+      const t = sim.land.cls[c] === 3 ? tw : (sim.sfc[S.T2 * NXY + c] + 273.15);
       for (const f of [S.TS, S.TD]) device.queue.writeBuffer(sfcBuf, (f * NXY + c) * 4, Float32Array.of(t));
       if (sim.land.cls[c] === 3) device.queue.writeBuffer(sfcBuf, (S.SWE * NXY + c) * 4, Float32Array.of(0));
     }
@@ -3314,7 +3413,12 @@ async function init() {
     const [x, y] = mapXY(e);
     sim.paint = { x, y, sign: e.button === 2 || e.shiftKey ? -1 : 1 };
   });
-  cxy.addEventListener('pointerup', () => { sim.paint = null; });
+  cxy.addEventListener('pointerup', () => {
+    if (sim.paint) { sim.paint = null; flushPaintTerrain(); }
+  });
+  cxy.addEventListener('pointercancel', () => {
+    if (sim.paint) { sim.paint = null; flushPaintTerrain(); }
+  });
   // kliknięcie (bez malowania): sonda w tym punkcie – sondaż i meteogram
   cxy.addEventListener('click', (e) => {
     if (v3.on || $('paint').checked || (pan && pan.moved)) return;
@@ -5211,23 +5315,25 @@ async function init() {
     last = now;
     flyTick(realDt);
 
-    // malowanie terenu / custom world (na żywo, bez restartu)
+    // malowanie terenu / custom world — light GPU sync while brush is down; full flowNet on pointer-up
     const pw = $('paintWhat').value;
     const br = brushR(), bi = brushInt();
     if (sim.paint && pw === 'water') {
-      paintWater(sim.paint.x, sim.paint.y, br, sim.paint.sign > 0);
+      paintWater(sim.paint.x, sim.paint.y, br, sim.paint.sign > 0, { light: true });
     } else if (sim.paint && (pw === 'sea' || pw === 'lake' || pw === 'sst' || pw === 'soil')) {
       const w = ensureWorld();
       sim.worldOn = true;
       $('shape').value = 'world';
       if (pw === 'sst') {
         const target = num('sstBrush');
-        const R = Math.ceil(br);
+        const R = Math.ceil(br), r2 = br * br;
         const blend = Math.min(1, 4 * realDt * bi);
+        const px = sim.paint.x, py = sim.paint.y;
         for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
-          const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
+          const ii = Math.floor(px) + di, jj = Math.floor(py) + dj;
           if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
-          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > br) continue;
+          const dx = ii + 0.5 - px, dy = jj + 0.5 - py;
+          if (dx * dx + dy * dy > r2) continue;
           const c = jj * NXV + ii;
           if (!(w.sea[c] || w.lake[c])) continue;
           const aim = sim.paint.sign > 0 ? target : Math.max(-1.8, (Number.isFinite(w.sst[c]) ? w.sst[c] : target) - 2);
@@ -5236,24 +5342,26 @@ async function init() {
         }
       } else if (pw === 'soil') {
         const target = num('soilBrush') / 100;
-        const R = Math.ceil(br);
+        const R = Math.ceil(br), r2 = br * br;
         const blend = Math.min(1, 4 * realDt * bi);
+        const px = sim.paint.x, py = sim.paint.y;
         for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
-          const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
+          const ii = Math.floor(px) + di, jj = Math.floor(py) + dj;
           if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
-          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > br) continue;
+          const dx = ii + 0.5 - px, dy = jj + 0.5 - py;
+          if (dx * dx + dy * dy > r2) continue;
           const c = jj * NXV + ii;
           if (w.sea[c] || w.lake[c]) continue;
           const aim = sim.paint.sign > 0 ? target : Math.max(0, w.soil[c] - 0.15);
           w.soil[c] = w.soil[c] + (aim - w.soil[c]) * blend;
+          if (sim.land) sim.land.w[jj * NX + ii] = w.soil[c];
         }
-        applyWorldToSim();
-        if (sim.land) setSoil();
+        if (sim.land) device.queue.writeBuffer(sfcBuf, S.W * NXY * 4, sim.land.w);
+        sim.paintNeedsFlush = true;
       } else {
         paintWorld(w, pw, sim.paint.x, sim.paint.y, br, sim.paint.sign > 0 ? 1 : 0, { wrap: !CFG.OPEN, hard: true });
-        applyWorldToSim();
+        syncWorldBrushVisual(sim.paint.x, sim.paint.y, br);
       }
-      worldHint();
     } else if (sim.paint && pw.startsWith('veg:')) {
       paintSurface(sim.paint.x, sim.paint.y, br, sim.paint.sign > 0 ? +pw.slice(4) : -1);
       if (sim.worldOn && sim.world) {
@@ -5267,9 +5375,12 @@ async function init() {
         paintWorld(sim.world, 'h', sim.paint.x, sim.paint.y, br, amt, { wrap: !CFG.OPEN });
         $('shape').value = 'world';
       } else $('shape').value = 'painted';
-      applyTerrain();
-      $('hills').value = String(Math.round(sim.hmax / 50) * 50);
-      $('hillsV').textContent = fmH(sim.hmax);
+      applyTerrain({ heightsOnly: true });
+      sim.paintNeedsFlush = true;
+      if (now - lastUi > 100) {
+        $('hills').value = String(Math.round(sim.hmax / 50) * 50 || 0);
+        $('hillsV').textContent = fmH(sim.hmax);
+      }
     }
 
     const q = perfState.quality;

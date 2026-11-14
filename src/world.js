@@ -95,7 +95,8 @@ const d01 = (a) => { const x = a - 0.5; return x - Math.round(x); };
 
 /** Soft brush over a world layer. amount: for h/sst/soil additive; for sea/lake/veg absolute (or −1 to clear veg). */
 export function paintWorld(w, layer, x, y, r, amount, { wrap = true, hard = false } = {}) {
-  const R = Math.ceil(2 * r);
+  const R = Math.ceil((hard ? 1 : 2) * r);
+  const r2 = r * r, r2out = hard ? r2 : r2 * 4, invR2 = 1 / (r2 || 1);
   for (let dj = -R; dj <= R; dj++) {
     for (let di = -R; di <= R; di++) {
       let ii = Math.floor(x) + di, jj = Math.floor(y) + dj;
@@ -103,16 +104,16 @@ export function paintWorld(w, layer, x, y, r, amount, { wrap = true, hard = fals
       ii = wrapI(w, ii); jj = wrapJ(w, jj);
       const dx = Math.floor(x) + di + 0.5 - x, dy = Math.floor(y) + dj + 0.5 - y;
       const d2 = dx * dx + dy * dy;
-      if (d2 > r * r * 4) continue;
-      const wgt = hard ? (d2 <= r * r ? 1 : 0) : Math.exp(-d2 / (r * r));
-      if (wgt < 0.02) continue;
+      if (d2 > r2out) continue;
+      const wgt = hard ? 1 : Math.exp(-d2 * invR2);
+      if (!hard && wgt < 0.02) continue;
       const c = at(w, ii, jj);
       if (layer === 'h') {
         w.h[c] = Math.min(8000, Math.max(0, w.h[c] + amount * wgt));
       } else if (layer === 'sea') {
-        if (wgt > 0.35) { w.sea[c] = amount > 0 ? 1 : 0; if (amount > 0) { w.lake[c] = 0; w.h[c] = 0; } }
+        if (hard || wgt > 0.35) { w.sea[c] = amount > 0 ? 1 : 0; if (amount > 0) { w.lake[c] = 0; w.h[c] = 0; } }
       } else if (layer === 'lake') {
-        if (wgt > 0.35) {
+        if (hard || wgt > 0.35) {
           w.lake[c] = amount > 0 ? 1 : 0;
           if (amount > 0) { w.sea[c] = 0; w.h[c] = Math.min(w.h[c], 5); }
         }
@@ -122,7 +123,7 @@ export function paintWorld(w, layer, x, y, r, amount, { wrap = true, hard = fals
       } else if (layer === 'soil') {
         w.soil[c] = Math.min(1, Math.max(0, w.soil[c] + amount * wgt));
       } else if (layer === 'veg') {
-        if (wgt > 0.35) w.veg[c] = amount;
+        if (hard || wgt > 0.35) w.veg[c] = amount;
       }
     }
   }
