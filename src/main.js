@@ -2429,22 +2429,31 @@ async function init() {
       sim.world = unpackWorld(st.world, NXV, NYV);
       sim.worldOn = true;
       if ($('worldPreset') && sim.world.preset) $('worldPreset').value = sim.world.preset;
+      $('shape').value = 'world';
       worldHint();
     } else {
       sim.worldOn = false; sim.world = null; worldHint();
     }
-    if (st.hv && st.hv.length === NXV * NYV) sim.hv.set(st.hv);
-    else if (sim.worldOn) applyWorldToSim();
-    else setShape($('shape').value);
-    sim.wmask = st.wmask && st.wmask.length === NXV * NYV ? Int8Array.from(st.wmask) : null;
-    sim.lmask = st.lmask && st.lmask.length === NXV * NYV ? Int8Array.from(st.lmask) : null;
-    sim.vmask = st.vmask && st.vmask.length === NXV * NYV ? Int8Array.from(st.vmask) : null;
+    if (sim.worldOn && sim.world) {
+      // Sync sea/sst/soil/veg/masks from packed world; then prefer exact saved hv when present
+      applyWorldToSim();
+      if (st.hv && st.hv.length === NXV * NYV) sim.hv.set(st.hv);
+    } else if (st.hv && st.hv.length === NXV * NYV) {
+      sim.hv.set(st.hv);
+    } else {
+      setShape($('shape').value);
+    }
+    if (st.wmask && st.wmask.length === NXV * NYV) sim.wmask = Int8Array.from(st.wmask);
+    if (st.lmask && st.lmask.length === NXV * NYV) sim.lmask = Int8Array.from(st.lmask);
+    if (st.vmask && st.vmask.length === NXV * NYV) sim.vmask = Int8Array.from(st.vmask);
     sim.lwet = st.lwet && st.lwet.length === NXV * NYV ? Float32Array.from(st.lwet, (x) => x / 100) : null;
   }
   function setState(st) {
     const g = st.grid || {};
     const gnx = g.nx || g.n, gny = g.ny || g.n;
     if (g.dx !== CFG.DX || gnx !== NXD || gny !== NYD || (g.mg ?? MG) !== MG || (g.bc === 'per') === CFG.OPEN) return false;   // inna siatka
+    // Leave pre-start world editor so reset() runs full PE spin-up for the loaded start
+    if (sim.worldEdit) setWorldEdit(false);
     applyStateUi(st);
     if (st.stations) stations.importList(st.stations);
     applyTerrain();
@@ -2470,23 +2479,41 @@ async function init() {
   }
   // wczytanie: na innej siatce przeładowanie strony ze stanem w adresie
   async function loadState(st) {
-    if (setState(st)) { $('stInfo').textContent = 'State loaded.'; return; }
+    if (setState(st)) {
+      $('stInfo').textContent = st.world ? 'State loaded (including custom world).' : 'State loaded.';
+      await resetting;   // wait for PE spin-up (esp. #s= boot with load screen still on)
+      $('loadScr').classList.remove('on');
+      return;
+    }
     const g = st.grid;
     location.href = `${location.pathname}?dx=${g.dx}&nx=${g.nx || g.n}&ny=${g.ny || g.n}${g.mg !== undefined ? `&mg=${g.mg}` : ''}${g.bc === 'per' ? '&bc=per' : ''}#s=${await packState(st)}`;
   }
   $('stSave').onclick = () => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(getState())], { type: 'application/json' }));
-    a.download = `weather3d_state_${$('date').value}_${CFG.DX}m.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const el = $('stInfo');
+    try {
+      const json = JSON.stringify(getState());
+      const blob = new Blob([json], { type: 'application/json' });
+      const name = `weather3d_state_${$('date').value}_${CFG.DX}m.json`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+      const kb = blob.size / 1024;
+      const size = kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb.toFixed(0)} KB`;
+      el.textContent = `Saved ${name} (${size}).`;
+    } catch (e) { el.textContent = `Could not save the file: ${e.message}`; }
   };
   $('stLoad').onclick = () => $('stFile').click();
   $('stFile').onchange = async () => {
     const file = $('stFile').files[0];
     $('stFile').value = '';
     if (!file) return;
-    try { await loadState(JSON.parse(await file.text())); } catch (e) { $('stInfo').textContent = `File error: ${e.message}`; }
+    $('stInfo').textContent = 'Loading…';
+    try { await loadState(JSON.parse(await file.text())); }
+    catch (e) { $('stInfo').textContent = `Could not load the file: ${e.message}`; }
   };
   $('stLink').onclick = async () => {
     const url = `${location.origin}${location.pathname}${gridQuery()}#s=${await packState(getState())}`;
@@ -5295,9 +5322,18 @@ async function init() {
   $('landuse').value = 'mosaic';
   setShape('flat');
   const urlScen = new URLSearchParams(location.search).get('scen'), urlStart = new URLSearchParams(location.search).get('start');
+  const hashState = location.hash.startsWith('#s=');
   if (new URLSearchParams(location.search).has('resume')) resumeRun();
   else if (urlStart !== null) startFromTitle(urlStart);
-  else {
+  else if (hashState) {
+    // Saved settings / Copy link: do not race a default reset() against loadState
+    $('loadMsg').textContent = 'Loading saved settings…';
+    unpackState(location.hash.slice(3)).then(loadState).catch((e) => {
+      $('loadScr').classList.remove('on');
+      $('stInfo').textContent = `Could not load the link: ${e.message}`;
+      fail(`Could not load the saved settings: ${e.message}`);
+    });
+  } else {
     $('loadScr').classList.remove('on');
     if (urlScen && SCENARIOS[urlScen]) applyScenario(urlScen);
     else reset();
@@ -5307,10 +5343,6 @@ async function init() {
   labels();
   loadPrefs();                                     // zapamiętane ustawienia widoku (zakładka, nakładki, zwinięte panele)
   if (sim.profModePref) setProfMode(sim.profModePref);
-  // scenariusz z linku (#s=…)
-  if (location.hash.startsWith('#s=')) {
-    unpackState(location.hash.slice(3)).then(loadState).catch((e) => { $('stInfo').textContent = `Invalid link: ${e.message}`; });
-  }
 
   requestAnimationFrame(frame);
 
