@@ -25,6 +25,7 @@ import {
   QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync, resolveQuality,
   cgItersFor, diagIntervalMs, canvasScale, volStride, MAX_STEPS,
 } from './perf.js';
+import { isGpuDropped, shaderCompilationInfo } from './gpuutil.js';
 import commonSrc from './shaders/common.wgsl?raw';
 import simSrc from './shaders/sim.wgsl?raw';
 import renderSrc from './shaders/render.wgsl?raw';
@@ -75,7 +76,12 @@ async function init() {
   const device = await adapter.requestDevice({ requiredFeatures: hasTS ? ['timestamp-query'] : [],
     requiredLimits: { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } });
   device.lost.then((info) => fail('GPU device lost: ' + info.message));
-  device.addEventListener('uncapturederror', (e) => fail('GPU error: ' + e.error.message));
+  device.addEventListener('uncapturederror', (e) => {
+    const msg = e.error?.message || String(e.error);
+    // Chromium/Dawn: transient cancellation while compiling — do not hard-kill the run
+    if (isGpuDropped(msg)) { console.warn('GPU (ignored):', msg); return; }
+    fail('GPU error: ' + msg);
+  });
 
   const { NX, NY, NZ, DT } = CFG;
   const NXY = NX * NY, N = NXY * NZ, NW = NXY * (NZ + 1);
@@ -162,7 +168,7 @@ async function init() {
 
   async function module(code, name) {
     const m = device.createShaderModule({ code, label: name });
-    const info = await m.getCompilationInfo();
+    const info = await shaderCompilationInfo(m);
     const errs = info.messages.filter((x) => x.type === 'error');
     if (errs.length) throw new Error(name + ':\n' + errs.map((e) => `${e.lineNum}:${e.linePos} ${e.message}`).join('\n'));
     return m;
@@ -1397,7 +1403,14 @@ async function init() {
       drawPreview();
       return Promise.resolve();
     }
-    resetting = resetting.then(doReset).catch((e) => fail(String(e.stack || e)));
+    resetting = resetting.then(doReset).catch(async (e) => {
+      // Mid-run PE shader rebuild can hit Chromium's Instance-dropped cancellation — retry once
+      if (isGpuDropped(e)) {
+        console.warn('reset retry after GPU hiccup:', e);
+        try { await doReset(); return; } catch (e2) { fail(String(e2.stack || e2)); return; }
+      }
+      fail(String(e.stack || e));
+    });
     return resetting;
   }
   async function doReset() {
@@ -5366,4 +5379,7 @@ async function init() {
   }
 }
 
-init().catch((e) => fail(String(e.stack || e)));
+init().catch((e) => {
+  if (isGpuDropped(e)) fail('GPU was interrupted while compiling shaders. Reload the page and try again.\n' + (e.message || e));
+  else fail(String(e.stack || e));
+});

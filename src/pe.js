@@ -13,6 +13,7 @@ import { zonWave, NMW } from './zonwave.js';
 import { soilClim } from './soilclim.js';
 import { baseLand } from './climbase.js';
 import peSrc from './shaders/pe.wgsl?raw';
+import { gpuRetry, shaderCompilationInfo } from './gpuutil.js';
 
 export const NYP = 96, NZP = 12;
 export const DXP = 75e3;
@@ -206,6 +207,7 @@ function seaMask(lat, cont) {
 }
 
 let shared = null;   // potoki i wspólne bufory (na urządzenie)
+let sharedJob = null; // serializuje przebudowę (szerokość kanału / urządzenie)
 
 function header() {
   return `const NXP: u32 = ${NXP}u;\nconst NYP: u32 = ${NYP}u;\nconst NZP: u32 = ${NZP}u;\nconst NW: u32 = ${NW}u;\n`
@@ -215,13 +217,17 @@ function header() {
     + `const WVM: u32 = ${NMW}u;\nconst BMS: f32 = ${BMS.toFixed(3)};\nconst SMR: f32 = ${(SMT > 0 ? 1 / (SMT * 86400) : 0).toExponential(4)};\n`;
 }
 
-async function getShared(device) {
-  if (shared && shared.device === device && shared.nxp === NXP) return shared;
-  if (shared) { shared.B.destroy(); shared.C.destroy(); shared = null; }
+async function rebuildShared(device) {
+  const want = NXP;
+  if (shared) {
+    try { shared.B.destroy(); shared.C.destroy(); } catch { /* already gone */ }
+    shared = null;
+  }
   const mod = device.createShaderModule({ code: header() + peSrc, label: 'pe' });
-  const info = await mod.getCompilationInfo();
+  const info = await shaderCompilationInfo(mod);
   const errs = info.messages.filter((x) => x.type === 'error');
   if (errs.length) throw new Error('pe.wgsl:\n' + errs.map((e) => `${e.lineNum}:${e.linePos} ${e.message}`).join('\n'));
+  if (want !== NXP) return; // szerokość zmieniła się w trakcie kompilacji — pętla getShared zbuduje od nowa
   const C = GPUShaderStage.COMPUTE;
   const layout = device.createBindGroupLayout({
     entries: [
@@ -236,12 +242,29 @@ async function getShared(device) {
   const pipes = {};
   for (const e of ['pe_zm', 'pe_wv', 'pe_rad', 'pe_diag', 'pe_stage', 'pe_div', 'pe_dft', 'pe_tri', 'pe_idft', 'pe_acc', 'pe_res', 'pe_pmean', 'pe_proj', 'pe_column', 'pe_lap',
     'pe_hyper', 'pe_params', 'pe_center', 'pe_hist', 'pe_map']) {
-    pipes[e] = await device.createComputePipelineAsync({ layout: pl, compute: { module: mod, entryPoint: e } });
+    if (want !== NXP) return;
+    pipes[e] = await gpuRetry(() => device.createComputePipelineAsync({ layout: pl, compute: { module: mod, entryPoint: e } }));
   }
+  if (want !== NXP) return;
   const U = GPUBufferUsage;
   const sb = () => device.createBuffer({ size: 5 * N3 * 4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
-  shared = { device, layout, pipes, B: sb(), C: sb(), nxp: NXP };
-  return shared;
+  shared = { device, layout, pipes, B: sb(), C: sb(), nxp: want, mod };
+}
+
+async function getShared(device) {
+  const ready = () => shared && shared.device === device && shared.nxp === NXP;
+  if (ready()) return shared;
+  if (!sharedJob) {
+    sharedJob = (async () => {
+      try {
+        while (!ready()) await rebuildShared(device);
+        return shared;
+      } finally {
+        sharedJob = null;
+      }
+    })();
+  }
+  return sharedJob;
 }
 
 export class PEModel {
