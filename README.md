@@ -45,7 +45,7 @@ All of the weather is simulated by a separate synoptic model. It creates weather
 - Dynamic soundings, hodographs and vertical cross-sections. Weather stations that record the data, with an easy-to-use CSV export system.
 - You can compare months, seasons and years in the climate analysis tab.
 - If you don't want real terrain, you can paint it, as well as water and surface types, while the simulation runs. You can also save the state to a file or a link.
-- **Custom World Builder** (World tab, or “Start custom world” on the title screen): build a synthetic geography with presets (flat, island, inland sea, archipelago, desert basin, mountain coast) and brushes for height, sea, lakes, SST, soil and vegetation. The same maps feed the synoptic model around the latitude circle, so you get weather that fits the made-up coastline without downloading a DEM.
+- **Custom World Builder** (World tab, or “Design custom world” on the title screen): invent geography with presets and brushes *before* weather starts, then press **Begin weather**. Presets cover flat, island, inland sea, archipelago, desert basin, and mountain coast; brushes cover height, sea, lakes, SST, soil and vegetation. The same maps feed the synoptic model around the latitude circle, so you get weather that fits the made-up coastline without downloading a DEM.
 
 ## If you want to run it locally
 

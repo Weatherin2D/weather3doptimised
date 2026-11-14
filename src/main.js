@@ -396,6 +396,7 @@ async function init() {
     flat: true, seed: 1, h: new Float32Array(NXY), hv: new Float32Array(NXV * NYV), hmax: 0, startHour: 6, doy0: 172, year: 2026,
     paint: null,
     worldOn: false, world: null,   // Custom World Builder maps (h, sea, sst, soil, veg, lake)
+    worldEdit: false,              // pre-start editor: presets/paint only; PE spin-up deferred until Begin weather
     probe: { i: MG + Math.floor(NXD / 2), j: MG + Math.floor(NYD / 2) },   // sonda (domyślnie środek mapy)
     probeEnc: -1, probeColAt: -1, probeCol: null,
   };
@@ -543,9 +544,53 @@ async function init() {
   function worldHint() {
     const el = $('worldModeHint');
     if (!el) return;
+    if (sim.worldEdit && sim.worldOn && sim.world) {
+      el.textContent = `World editor · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · seed ${sim.world.seed} · Begin weather when ready`;
+      return;
+    }
     el.textContent = sim.worldOn && sim.world
       ? `Custom world: on · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · seed ${sim.world.seed}`
       : 'Custom world: off';
+  }
+  function setWorldEdit(on) {
+    sim.worldEdit = !!on;
+    document.body.classList.toggle('world-edit', !!on);
+    const side = $('worldBeginWxSideBox');
+    if (side) side.style.display = on ? '' : 'none';
+    worldHint();
+  }
+  function enterWorldEdit() {
+    setWorldEdit(true);
+    sim.busy = false;
+    sim.paused = true;
+    if ($('paint')) {
+      $('paint').checked = true;
+      $('paint').dispatchEvent(new Event('change'));
+    }
+    selectTab('ter', true);
+    if ($('fieldH')) {
+      $('fieldH').value = '30';
+      $('fieldH').dispatchEvent(new Event('change'));
+    }
+    labels();
+    drawPreview();
+  }
+  async function beginWeather() {
+    if (!sim.worldEdit) return;
+    setWorldEdit(false);
+    $('loadScr').classList.add('on');
+    $('loadMsg').textContent = 'Preparing the synoptic model…';
+    const poll = setInterval(() => {
+      const t = $('wxNow').textContent;
+      if (t && t !== '–') $('loadMsg').textContent = t;
+    }, 300);
+    labels();
+    await reset();
+    clearInterval(poll);
+    $('loadScr').classList.remove('on');
+    sim.paused = false;
+    labels();
+    toast('Weather started with your custom world');
   }
   function ensureWorld(seed = sim.seed) {
     if (!sim.world || sim.world.nx !== NXV || sim.world.ny !== NYV) {
@@ -1318,8 +1363,19 @@ async function init() {
 
   // Restart: stan bazowy z masy powietrza nad środkiem domeny, pola docelowe w dwóch terminach,
   // stan początkowy z pól docelowych (na GPU), powierzchnia z lokalnej temperatury powietrza.
+  // During worldEdit: refresh domain maps only — no PE spin-up until Begin weather.
   let resetting = Promise.resolve();
-  function reset() { resetting = resetting.then(doReset).catch((e) => fail(String(e.stack || e))); return resetting; }
+  function reset() {
+    if (sim.worldEdit) {
+      if (sim.worldOn) applyWorldToSim();
+      else { applyTerrain(); applyLand(); }
+      labels();
+      drawPreview();
+      return Promise.resolve();
+    }
+    resetting = resetting.then(doReset).catch((e) => fail(String(e.stack || e)));
+    return resetting;
+  }
   async function doReset() {
     sim.busy = true;
     manipFlat();
@@ -3073,9 +3129,18 @@ async function init() {
       reset(); labels();
     };
     if ($('worldClear')) $('worldClear').onclick = () => {
+      if (sim.worldEdit) {
+        enableCustomWorld('island');
+        reset(); labels();
+        toast('Reset to the island preset — press Begin weather when ready');
+        return;
+      }
       disableCustomWorld();
       reset(); labels();
     };
+    const beginWx = () => { beginWeather(); };
+    if ($('worldBeginWx')) $('worldBeginWx').onclick = beginWx;
+    if ($('worldBeginWxSide')) $('worldBeginWxSide').onclick = beginWx;
     worldHint();
   }
   $('accWin').addEventListener('change', () => { accBase(); labels(); });
@@ -4754,7 +4819,7 @@ async function init() {
     await drv.ccWait;
   }
   function weatherTick(full = false) {
-    if (sim.busy || sim.saving) return;
+    if (sim.busy || sim.saving || sim.worldEdit) return;
     bgTick();
     const now = performance.now();
     // mapa synoptyczna: odczyt pól z GPU, gdy zakładka jest widoczna
@@ -4906,8 +4971,13 @@ async function init() {
     const wantWorld = new URLSearchParams(location.search).get('world') === '1';
     if (mo !== undefined && mo !== '') $('date').value = `${($('date').value || '2026').slice(0, 4)}-${String(+mo + 1).padStart(2, '0')}-01`;
     if (wantWorld) {
-      say('Building custom world…');
+      // Pre-start World Builder: invent geography first; PE spin-up waits for Begin weather
+      say('Opening world editor…');
       enableCustomWorld('island');
+      enterWorldEdit();
+      $('loadScr').classList.remove('on');
+      labels();
+      return;
     } else if (la !== '' && lo !== undefined && lo !== '') {
       const lat = +la, lon = +lo;
       try {
@@ -5149,7 +5219,7 @@ async function init() {
       }
     }
 
-    if (sim.busy || sim.saving) n = 0;
+    if (sim.busy || sim.saving || sim.worldEdit) n = 0;
     if (n > 0) {
       runSteps(n, true);
       speedHist.push({ t: now, sim: n * DT });

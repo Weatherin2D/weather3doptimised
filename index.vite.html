@@ -200,6 +200,14 @@
     #loadScr.on { display: flex; }
     #loadScr img { width: 150px; height: 150px; }
     #loadMsg { color: var(--muted); font-size: 14px; min-height: 1.5em; text-align: center; max-width: 80vw; }
+    /* Pre-start World Builder: invent geography before PE spin-up */
+    #worldEditBar { display: none; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+      padding: 8px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); position: relative; z-index: 25; }
+    body.world-edit #worldEditBar { display: flex; }
+    #worldEditBar .web-msg { color: var(--text); font-size: 13px; }
+    #worldEditBar .web-msg b { color: #fff; }
+    body.world-edit #runCtl { opacity: 0.45; pointer-events: none; }
+    body.world-edit #chipSpeed { opacity: 0.5; }
     #titleScr { position: fixed; inset: 0; z-index: 80; background: var(--bg); display: none; flex-direction: column; padding: 14px; gap: 12px; }
     #titleScr.on { display: flex; }
     #titleScr header { display: flex; align-items: center; gap: 14px; flex: none; }
@@ -395,6 +403,10 @@
     <button id="anaBtn" class="iconbtn on" title="Analysis panel: cross-section, probe, stations (A)">◨ Analysis</button>
     <button id="helpBtn" class="iconbtn" title="Help and keyboard shortcuts (H)">?</button>
   </div>
+  <div id="worldEditBar">
+    <span class="web-msg"><b>World editor</b> — paint height, water, soil and cover, or pick a preset. Weather has not started yet.</span>
+    <button id="worldBeginWx" class="btn primary" title="Start the synoptic model with this geography">Begin weather</button>
+  </div>
 
   <div id="worldDlg">
     <div id="worldBox">
@@ -482,7 +494,7 @@
         <button id="ttStart" class="btn primary">Start</button>
         <div class="ttbtns">
           <button id="ttFlat" class="btn" title="No download: flat terrain, climate of Kraków">Start on flat terrain</button>
-          <button id="ttCustom" class="btn" title="No download: build a synthetic geography (island, archipelago, …) shared with the synoptic model">Start custom world</button>
+          <button id="ttCustom" class="btn" title="Opens the world editor first (presets and paint). Weather starts when you press Begin weather.">Design custom world</button>
           <button id="ttResume" class="btn" title="Continue a run saved with “Save run” in Settings">Load a saved run…</button>
         </div>
         <input id="ttRunFile" type="file" accept=".w3drun" hidden />
@@ -618,12 +630,15 @@
         <div class="thead"><i class="tmark"></i><span class="ttl">World</span><button class="tclose" title="Close the menu (Esc)">×</button></div>
         <div class="box">
           <h4>Custom world</h4>
-          <div class="hint">Build a synthetic geography (height, sea, lakes, SST, soil, vegetation). The synoptic model uses the same maps around the latitude circle – no DEM download.</div>
+          <div class="hint">Build a synthetic geography (height, sea, lakes, SST, soil, vegetation). From the title screen, invent the map first; weather starts when you press Begin weather. The synoptic model then uses the same maps – no DEM download.</div>
           <label><span class="lbl">Preset</span><select id="worldPreset"></select></label>
           <div class="btns">
-            <button id="worldApplyPreset" class="btn primary" title="Apply the preset and restart">Apply preset</button>
+            <button id="worldApplyPreset" class="btn primary" title="Apply the preset (restarts weather only after Begin weather)">Apply preset</button>
             <button id="worldRandom" class="btn" title="New random seed for the current preset">Randomize</button>
             <button id="worldClear" class="btn" title="Leave custom world mode">Exit custom</button>
+          </div>
+          <div class="btns" id="worldBeginWxSideBox" style="display:none">
+            <button id="worldBeginWxSide" class="btn primary" title="Start the synoptic model with this geography">Begin weather</button>
           </div>
           <div class="hint" id="worldModeHint">Custom world: off</div>
         </div>
