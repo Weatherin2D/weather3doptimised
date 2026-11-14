@@ -75,6 +75,7 @@ export function createWorld(nx, ny, seed = 1) {
   const n = nx * ny;
   return {
     nx, ny, seed: seed >>> 0, preset: 'flat',
+    hemi: 'N',   // 'N' | 'S' — climate latitude sign for seasons / SST clim / vegetation
     h: new Float32Array(n),
     sea: new Uint8Array(n),
     lake: new Uint8Array(n),
@@ -294,6 +295,7 @@ export function packWorld(w) {
   for (let c = 0; c < n; c++) sst[c] = Number.isFinite(w.sst[c]) ? Math.round(w.sst[c] * 10) / 10 : null;
   return {
     nx: w.nx, ny: w.ny, seed: w.seed, preset: w.preset,
+    hemi: w.hemi === 'S' ? 'S' : 'N',
     h: Array.from(w.h, (x) => Math.round(x)),
     sea: Array.from(w.sea),
     lake: Array.from(w.lake),
@@ -308,6 +310,7 @@ export function unpackWorld(pack, nx, ny) {
   if (!pack) return null;
   const w = createWorld(nx, ny, pack.seed || 1);
   w.preset = pack.preset || 'flat';
+  w.hemi = pack.hemi === 'S' ? 'S' : 'N';
   const same = pack.nx === nx && pack.ny === ny;
   const sample = (arr, fill, i, j) => {
     if (same) return arr[j * pack.nx + i];

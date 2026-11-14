@@ -632,6 +632,12 @@
           <h4>Custom world</h4>
           <div class="hint">Build a synthetic geography (height, sea, lakes, SST, soil, vegetation). From the title screen, invent the map first; weather starts when you press Begin weather. The synoptic model then uses the same maps – no DEM download.</div>
           <label><span class="lbl">Preset</span><select id="worldPreset"></select></label>
+          <label><span class="lbl">Hemisphere</span>
+            <select id="worldHemi" title="Sets climate latitude (seasons, SST climatology, vegetation)">
+              <option value="N">Northern</option>
+              <option value="S">Southern</option>
+            </select>
+          </label>
           <div class="btns">
             <button id="worldApplyPreset" class="btn primary" title="Apply the preset (restarts weather only after Begin weather)">Apply preset</button>
             <button id="worldRandom" class="btn" title="New random seed for the current preset">Randomize</button>

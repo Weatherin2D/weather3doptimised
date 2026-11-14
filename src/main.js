@@ -585,15 +585,33 @@ async function init() {
   }
 
   // --- Custom World Builder: shared maps → domain state ---
+  function worldHemi() {
+    return ($('worldHemi') && $('worldHemi').value === 'S') ? 'S' : 'N';
+  }
+  function hemiLabel(h = worldHemi()) {
+    return h === 'S' ? 'Southern' : 'Northern';
+  }
+  /** Apply N/S hemisphere: flip climate latitude, keep magnitude from preset or current lat. */
+  function applyWorldHemisphere(hemi = worldHemi(), { fromPreset = false } = {}) {
+    hemi = hemi === 'S' ? 'S' : 'N';
+    if ($('worldHemi')) $('worldHemi').value = hemi;
+    if (sim.world) sim.world.hemi = hemi;
+    const base = SYN_BASELINES[sim.world?.preset] || SYN_BASELINES.flat;
+    const mag = fromPreset ? Math.abs(base.lat)
+      : (Math.abs(num('lat')) || Math.abs(base.lat));
+    $('lat').value = hemi === 'S' ? -mag : mag;
+    worldHint();
+  }
   function worldHint() {
     const el = $('worldModeHint');
     if (!el) return;
+    const hemi = sim.world?.hemi || worldHemi();
     if (sim.worldEdit && sim.worldOn && sim.world) {
-      el.textContent = `World editor · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · seed ${sim.world.seed} · Begin weather when ready`;
+      el.textContent = `World editor · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · ${hemiLabel(hemi)} · seed ${sim.world.seed} · Begin weather when ready`;
       return;
     }
     el.textContent = sim.worldOn && sim.world
-      ? `Custom world: on · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · seed ${sim.world.seed}`
+      ? `Custom world: on · ${WORLD_PRESETS[sim.world.preset] || sim.world.preset} · ${hemiLabel(hemi)} · seed ${sim.world.seed}`
       : 'Custom world: off';
   }
   function setWorldEdit(on) {
@@ -769,11 +787,15 @@ async function init() {
     const w = ensureWorld(seed);
     applyPreset(w, preset, seed);
     const base = SYN_BASELINES[preset] || SYN_BASELINES.flat;
+    const hemi = worldHemi();
+    w.hemi = hemi;
     ensureCustom(`Custom world: ${WORLD_PRESETS[preset] || preset}`);
     $('location').value = 'custom';
-    $('lat').value = base.lat; $('lon').value = base.lon; $('cont').value = base.cont; $('hum').value = base.hum;
+    $('lat').value = hemi === 'S' ? -Math.abs(base.lat) : Math.abs(base.lat);
+    $('lon').value = base.lon; $('cont').value = base.cont; $('hum').value = base.hum;
     $('tbias').value = 0; CLIM.bias = 0;
     if ($('worldPreset')) $('worldPreset').value = preset;
+    if ($('worldHemi')) $('worldHemi').value = hemi;
     // Atmosphere manipulation baselines for this preset
     $('tanom').value = base.T;
     $('manipR').value = nearest(MANIP_RAIN, base.R);
@@ -2528,6 +2550,10 @@ async function init() {
       sim.world = unpackWorld(st.world, NXV, NYV);
       sim.worldOn = true;
       if ($('worldPreset') && sim.world.preset) $('worldPreset').value = sim.world.preset;
+      // Hemisphere from pack, else from saved latitude sign
+      const hemi = sim.world.hemi || ((+st.ui.lat < 0) ? 'S' : 'N');
+      sim.world.hemi = hemi;
+      if ($('worldHemi')) $('worldHemi').value = hemi;
       $('shape').value = 'world';
       worldHint();
     } else {
@@ -3292,6 +3318,16 @@ async function init() {
       const p = ($('worldPreset') && $('worldPreset').value) || sim.world?.preset || 'island';
       enableCustomWorld(p, 1 + Math.floor(Math.random() * 1e9));
       reset(); labels();
+    };
+    if ($('worldHemi')) $('worldHemi').onchange = () => {
+      applyWorldHemisphere($('worldHemi').value);
+      if (!sim.worldOn) return;
+      // Seasons / SST clim / auto vegetation follow the new latitude
+      applyLand({ light: !!sim.worldEdit });
+      syncWaterSstToGpu();
+      labels();
+      if (!sim.worldEdit) reset();
+      else { drawPreview(); toast(`${hemiLabel()} hemisphere — climate latitude ${(+num('lat')).toFixed(1)}°`); }
     };
     if ($('worldClear')) $('worldClear').onclick = () => {
       if (sim.worldEdit) {
