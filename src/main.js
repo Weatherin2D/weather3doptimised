@@ -23,7 +23,7 @@ import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, nearest, manipQuery, seg, segAt } fr
 import { packRun, openRun, jsonPack, jsonUnpack, stashRun, stashedRun, clearStash, resumeUrl } from './runfile.js';
 import {
   QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync, resolveQuality,
-  cgItersFor, frameBudgetMs, diagIntervalMs, canvasScale, volStride, maxStepsFor,
+  cgItersFor, diagIntervalMs, canvasScale, volStride, MAX_STEPS,
 } from './perf.js';
 import commonSrc from './shaders/common.wgsl?raw';
 import simSrc from './shaders/sim.wgsl?raw';
@@ -169,7 +169,7 @@ async function init() {
   const MUV_OFF = ST_AIR_OFF + ST_AIR * 48;
   const DIAG_BYTES = MUV_OFF + 8 * NZ;
   const diagRead = buf(DIAG_BYTES, U.MAP_READ | U.COPY_DST, 'diagRead');
-  const paramBuf = buf(SLOT * 128, U.UNIFORM | U.COPY_DST, 'params');   // 128 = maks. kroków (Fidelity)
+  const paramBuf = buf(SLOT * MAX_STEPS, U.UNIFORM | U.COPY_DST, 'params');   // MAX_STEPS = maks. kroków na chunk
   const TG_SLOT = 4 * N + 15 * NXY;                // pola docelowe jednego terminu (3D: θ', q_v, u, v; 2D: u_g, v_g, p, w, geometria frontu ×8, diagnostyka ×3)
   const NF = kfrOf(grid) * NXY;                    // wyostrzenie frontów Φ (θ', q_v, u, v) na poziomach poniżej ~7 km, dwa bufory na zmianę
   const tgtBuf = buf((3 * TG_SLOT + 8 * NF) * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST, 'targets');
@@ -1503,7 +1503,7 @@ async function init() {
   // n kroków; przy przejściu przez termin pól docelowych – nowy termin z modelu synoptycznego
   function runSteps(n, measure) {
     let done = 0, first = true;
-    const maxSteps = maxStepsFor(perfState.quality);
+    const maxSteps = MAX_STEPS;
     while (done < n) {
       if (sim.time + DT > drv.tA + DTQ + 1e-6) { advanceDriver(); continue; }
       const m = Math.max(1, Math.min(n - done, maxSteps, Math.floor((drv.tA + DTQ - sim.time) / DT + 1e-6)));
@@ -5135,20 +5135,18 @@ async function init() {
     }
 
     const q = perfState.quality;
-    const maxSteps = maxStepsFor(q);
     let n = 0;
     if (!sim.paused) {
       const mode = $('speed').value;
       if (mode === 'max') {
-        const budget = frameBudgetMs(q, v3.on, frameMsEma);
-        n = sim.msPerStep > 0 ? Math.max(1, Math.floor(budget / sim.msPerStep)) : 2;
+        n = MAX_STEPS;
       } else {
         sim.debt += realDt * Number(mode) / DT;
         n = Math.floor(sim.debt);
         sim.debt -= n;
         if (sim.debt > 1) sim.debt = 0;
+        n = Math.max(0, Math.min(MAX_STEPS, n));
       }
-      n = Math.max(0, Math.min(maxSteps, n));
     }
 
     if (sim.busy || sim.saving) n = 0;

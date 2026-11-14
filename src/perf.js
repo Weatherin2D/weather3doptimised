@@ -106,8 +106,10 @@ export function volStride(quality) {
   return quality === 'smooth' ? 2 : 1;
 }
 
-export function maxStepsFor(quality) {
-  return quality === 'smooth' ? 48 : quality === 'balanced' ? 80 : 128;
+export const MAX_STEPS = 2048;
+
+export function maxStepsFor(_quality) {
+  return MAX_STEPS;
 }
 
 export function costFactor(tier) {
