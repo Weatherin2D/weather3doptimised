@@ -127,6 +127,19 @@ fn cmap(id: u32, t: f32) -> vec3f {
   }
 }
 
+fn sstClassic(t0: f32) -> vec3f {
+  // Classic ocean SST (−2…+32 °C): purple → blue → cyan → green → yellow → orange → red
+  let t = clamp(t0, 0.0, 1.0);
+  let c = array<vec3f, 11>(
+    vec3f(0.45, 0.00, 0.55), vec3f(0.25, 0.05, 0.70), vec3f(0.10, 0.20, 0.85), vec3f(0.05, 0.45, 0.95),
+    vec3f(0.05, 0.75, 0.85), vec3f(0.10, 0.85, 0.45), vec3f(0.55, 0.92, 0.15), vec3f(0.98, 0.92, 0.10),
+    vec3f(1.00, 0.65, 0.05), vec3f(0.98, 0.30, 0.05), vec3f(0.85, 0.05, 0.08)
+  );
+  let s = t * 10.0;
+  let i = min(u32(s), 9u);
+  return mix(c[i], c[i + 1u], s - f32(i));
+}
+
 fn cmapOf(f: u32) -> u32 {
   switch f {
     case 0u, 20u, 21u, 24u: { return 22u; }
@@ -161,6 +174,7 @@ fn cmapOf(f: u32) -> u32 {
     case 55u: { return 27u; }
     case 56u, 66u: { return 8u; }
     case 30u: { return 10u; }
+    case 78u: { return 32u; }
     case 79u: { return 31u; }
     default: { return 1u; }
   }
@@ -318,6 +332,11 @@ fn mapCol(f: u32, col: u32) -> f32 {
     case 66u: { return sfcAt(S_SMODE, col); }
     case 67u: { return max(sfcAt(S_ORG, col), sfcAt(S_ORGB, col)); }
     case 68u: { return sfcAt(S_FRT, col); }
+    case 78u: {
+      // Sea surface temperature (°C); land → cold sentinel (colour path uses LAND mask)
+      if (u32(vg[VG_LAND + col] + 0.5) != 3u) { return -2.0; }
+      return sfcAt(S_TS, col) - 273.15;
+    }
     case 79u: { return vg[VG_VEG + col]; }
     case 69u: { return 1000.0 * sfcAt(S_LWPA, col); }
     case 37u: { return sfcAt(S_CLL, col) + sfcAt(S_CLM, col) + sfcAt(S_CLH, col); }
@@ -714,6 +733,14 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let Yt = Y + (0.9 * (vnoise(qt + vec2f(21.7, 3.4)) - 0.5) + 0.45 * (vnoise(qt * 2.7 + vec2f(6.6, 19.5)) - 0.5)) * jT;
     let gt = select(vegColor(wrapi(i32(floor(Y)), NY) * NX + wrapi(i32(floor(X)), NX)), groundHiA(Xt, Yt, fpT).c, V.vhF > 1.5);
     col = gt * (0.55 + 0.45 * hillshade(X, Y, nw));
+  } else if (cm == 32u) {
+    // Classic SST map: white land, rainbow ocean (−2…+32 °C)
+    let cq = wrapi(i32(floor(Y)), NY) * NX + wrapi(i32(floor(X)), NX);
+    if (u32(vg[VG_LAND + cq] + 0.5) == 3u) {
+      col = sstClassic((sfcAt(S_TS, cq) - 273.15 + 2.0) / 34.0);
+    } else {
+      col = vec3f(0.97, 0.97, 0.97) * (0.92 + 0.08 * hillshade(X, Y, nw));
+    }
   } else if (cm == 19u) {
     // grad: małe (< 2 cm) żółte, duże (2–5 cm) pomarańczowe, bardzo duże (> 5 cm) fioletowe
     col = vec3f(0.70) * (0.55 + 0.45 * hillshade(X, Y, nw));

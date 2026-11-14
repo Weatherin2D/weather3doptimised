@@ -679,6 +679,7 @@ async function init() {
           const cc = jj * NX + ii;
           if (water) {
             sim.land.cls[cc] = 3;
+            if (sim.veg) sim.veg[cc] = VEG.WATER;   // field 79 reads VEG — must update live
           } else {
             if (sim.land.cls[cc] === 3) sim.land.cls[cc] = sim.lmask[c] >= 0 ? sim.lmask[c] : 0;
             else if (sim.lmask[c] >= 0) sim.land.cls[cc] = sim.lmask[c];
@@ -707,6 +708,25 @@ async function init() {
     $('hills').value = String(Math.round(sim.hmax / 50) * 50 || 0);
     if ($('hillsV')) $('hillsV').textContent = fmH(sim.hmax);
     worldHint();
+    if ($('paintWhat')?.value === 'sst') syncWaterSstToGpu();
+  }
+  // Push water-cell SST (°C → K) into S_TS so field 78 (classic SST map) updates live while painting.
+  function syncWaterSstToGpu() {
+    if (!sim.land) return;
+    const doy = dayOfYear($('date').value);
+    const def = num('water');
+    const ts = new Float32Array(NXY);
+    for (let j = 0; j < NYV; j++) {
+      for (let i = 0; i < NXV; i++) {
+        const c = j * NXV + i, cc = j * NX + i;
+        if (sim.land.cls[cc] !== 3) continue;
+        let tC = def;
+        if (sim.worldOn && sim.world && Number.isFinite(sim.world.sst[c])) tC = sim.world.sst[c];
+        else tC = sstClim(latRow(cc), doy);
+        ts[cc] = tC + 273.15;
+      }
+    }
+    device.queue.writeBuffer(sfcBuf, S.TS * NXY * 4, ts);
   }
   function applyWorldToSim() {
     const w = ensureWorld();
@@ -743,6 +763,7 @@ async function init() {
     }
     worldHint();
     sim.paintNeedsFlush = false;
+    syncWaterSstToGpu();
   }
   function enableCustomWorld(preset = 'island', seed = 1 + Math.floor(Math.random() * 1e9)) {
     const w = ensureWorld(seed);
@@ -3244,8 +3265,10 @@ async function init() {
     const paintView = () => {
       brushLabs();
       if (!$('paint').checked) return;
-      $('fieldH').value = sel.value === 'terrain' || sel.value === 'sst' || sel.value === 'soil' ? (sel.value === 'terrain' ? '30' : '79') : '79';
+      const v = sel.value;
+      $('fieldH').value = v === 'terrain' ? '30' : v === 'sst' ? '78' : v === 'soil' ? '28' : '79';
       $('fieldH').dispatchEvent(new Event('change'));
+      if (v === 'sst') syncWaterSstToGpu();
       labels();
     };
     $('paint').onchange = paintView;
@@ -3313,6 +3336,7 @@ async function init() {
         const vi = cc % NX, vj = Math.floor(cc / NX), vc = vj * NXV + vi;
         if (isWaterV(vc)) {
           sim.land.cls[cc] = 3;
+          if (sim.veg) sim.veg[cc] = VEG.WATER;
         } else {
           sim.land.cls[cc] = (sim.lmask && sim.lmask[vc] >= 0) ? sim.lmask[vc] : 0;
           if (sim.veg) sim.veg[cc] = (sim.vmask && sim.vmask[vc] >= 0) ? sim.vmask[vc]
@@ -5340,6 +5364,7 @@ async function init() {
           const cur = Number.isFinite(w.sst[c]) ? w.sst[c] : aim;
           w.sst[c] = cur + (aim - cur) * blend;
         }
+        syncWaterSstToGpu();   // live classic SST map (field 78)
       } else if (pw === 'soil') {
         const target = num('soilBrush') / 100;
         const R = Math.ceil(br), r2 = br * br;
@@ -5360,6 +5385,20 @@ async function init() {
         sim.paintNeedsFlush = true;
       } else {
         paintWorld(w, pw, sim.paint.x, sim.paint.y, br, sim.paint.sign > 0 ? 1 : 0, { wrap: !CFG.OPEN, hard: true });
+        // Seed SST clim on newly painted water so the SST view has values ready
+        {
+          const R = Math.ceil(br), r2 = br * br, px = sim.paint.x, py = sim.paint.y;
+          const doy = dayOfYear($('date').value);
+          for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+            const ii = Math.floor(px) + di, jj = Math.floor(py) + dj;
+            if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
+            const dx = ii + 0.5 - px, dy = jj + 0.5 - py;
+            if (dx * dx + dy * dy > r2) continue;
+            const c = jj * NXV + ii;
+            if (!(w.sea[c] || w.lake[c])) continue;
+            if (!Number.isFinite(w.sst[c])) w.sst[c] = sstClim(latRow(jj * NX + ii), doy);
+          }
+        }
         syncWorldBrushVisual(sim.paint.x, sim.paint.y, br);
       }
     } else if (sim.paint && pw.startsWith('veg:')) {

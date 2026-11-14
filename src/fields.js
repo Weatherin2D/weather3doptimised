@@ -36,6 +36,7 @@ export const FIELDS = {
   64: { name: 'Soil moisture 40–100 cm (volumetric)', unit: '%', cmap: 2, range: 'fixed', fixed: [0, 45] },
   29: { name: 'Satellite view (visible)', unit: 'g/m²', cmap: 9, range: 'fixed', fixed: [0, 1] },
   30: { name: 'Terrain height', unit: 'm', cmap: 10, range: 'terrain' },
+  78: { name: 'Sea surface temperature', unit: '°C', cmap: 32, range: 'fixed', fixed: [-2, 32] },
   79: { name: 'Surface type', unit: '', cmap: 31, range: 'fixed', fixed: [0, 11] },
   31: { name: 'Satellite IR (brightness temperature)', unit: '°C', cmap: 12, range: 'fixed', fixed: [-80, 40] },
   32: { name: 'Snow depth', unit: 'cm', cmap: 26, range: 'fixed', fixed: [0, 100] },
@@ -103,12 +104,12 @@ export const LAYER_GROUPS = [
   { name: 'Wind shear & helicity', items: [51, 52, 53, 54, 56] },
   { name: 'Composite charts', items: [55, 68] },
   { name: 'Flight meteorology', items: [40, 41] },
-  { name: 'Surface & soil', items: [79, 30, 25, 26, 27, 48, 28, 62, 63, 64, 33] },
+  { name: 'Surface & soil', items: [79, 78, 30, 25, 26, 27, 48, 28, 62, 63, 64, 33] },
   { name: 'Rivers & lakes', items: [45] },
   ...LAYER_LEVELS.map(([p, z]) => ({ name: `Pressure level – ${p} hPa / ${z}`, p, items: LEVEL_FIELDS })),
   { name: 'Any height (slider above the map)', z: true, items: FIELDS_3D },
 ];
-export const FIELDS_MAP = [20, 21, 46, 47, 48, 50, 49, 34, 22, 38, 42, 43, 55, 44, 57, 65, 68, 66, 67, 51, 52, 53, 54, 56, 23, 80, 81, 82, 83, 84, 85, 86, 87, 88, 45, 32, 40, 41, 24, 25, 26, 27, 28, 62, 63, 64, 33, 29, 58, 37, 31, 39, 30, 79];
+export const FIELDS_MAP = [20, 21, 46, 47, 48, 50, 49, 34, 22, 38, 42, 43, 55, 44, 57, 65, 68, 66, 67, 51, 52, 53, 54, 56, 23, 80, 81, 82, 83, 84, 85, 86, 87, 88, 45, 32, 40, 41, 24, 25, 26, 27, 28, 62, 63, 64, 33, 29, 58, 37, 31, 39, 30, 78, 79];
 
 // "Ładny" krok skali/izolinii: najmniejszy z 1, 2, 5 × 10^n nie mniejszy niż x
 export function niceStep(x) {
@@ -174,6 +175,16 @@ export function tempColor(t) {
   const s = Math.min(1, Math.max(0, (t + 50) / 100)) * 10, i = Math.min(9, Math.floor(s)), f = s - i;
   return TEMP_CLASSIC[i].map((a, n) => a + (TEMP_CLASSIC[i + 1][n] - a) * f);
 }
+// Classic ocean SST rainbow (−2…+32 °C): purple → blue → cyan → green → yellow → orange → red
+const SST_CLASSIC = [
+  [0.45, 0.00, 0.55], [0.25, 0.05, 0.70], [0.10, 0.20, 0.85], [0.05, 0.45, 0.95],
+  [0.05, 0.75, 0.85], [0.10, 0.85, 0.45], [0.55, 0.92, 0.15], [0.98, 0.92, 0.10],
+  [1.00, 0.65, 0.05], [0.98, 0.30, 0.05], [0.85, 0.05, 0.08],
+];
+export function sstColor(t) {
+  const s = Math.min(1, Math.max(0, (t + 2) / 34)) * 10, i = Math.min(9, Math.floor(s)), f = s - i;
+  return SST_CLASSIC[i].map((a, n) => a + (SST_CLASSIC[i + 1][n] - a) * f);
+}
 const rgb = (c) => `rgb(${c.map((x) => Math.round(255 * Math.min(1, Math.max(0, x)))).join(',')})`;
 export const RADAR_STEPS = [0.1, 0.5, 1, 2, 5, 10, 20, 50];
 // suma opadu [mm]: 18 klas od 0.5 do 2000 mm (sumy roczne), najwięcej kolorów w dolnym zakresie
@@ -237,6 +248,9 @@ export function legendCss(cm) {
   if (cm === 31) {
     const n = VEG_COLORS.length;
     return 'linear-gradient(90deg,' + VEG_COLORS.map((c, i) => `${rgb(c[0])} ${(100 * i) / n}% ${(100 * (i + 1)) / n}%`).join(',') + ')';
+  }
+  if (cm === 32) {
+    return 'linear-gradient(90deg,' + SST_CLASSIC.map((c, i) => `${rgb(c)} ${(i * 10).toFixed(0)}%`).join(',') + ')';
   }
   if (cm === 30) return 'linear-gradient(90deg, rgb(140,38,178) 0%, rgb(224,26,20) 25%, rgb(219,219,219) 50%, rgb(89,173,255) 75%, rgb(10,31,178) 100%)';
   const r = RAMPS[cm];
