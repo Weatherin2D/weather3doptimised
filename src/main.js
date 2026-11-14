@@ -108,6 +108,30 @@ async function init() {
   const CFGV = { ...CFG, NX: NXV, NY: NYV };
   const L_KM = NXD * CFG.DX / 1000;          // bok widocznej mapy W–E [km]
   const LY_KM = NYD * CFG.DY / 1000;         // bok S–N [km]
+  // Brush radius in grid cells: UI is km, but never thinner than ~¾ cell so hard brushes always hit the click.
+  const brushR = () => Math.max(0.75, num('brush') * 1000 / CFG.DX);
+  // Intensity: 40% → 1× the historic raise/blend rate; used for height, SST and soil.
+  const brushInt = () => Math.max(0.05, num('brushInt') / 40);
+  function configureBrushUi() {
+    const cellKm = CFG.DX / 1000;
+    const half = Math.min(L_KM, LY_KM) / 2;
+    const minKm = Math.max(cellKm, cellKm < 0.5 ? 0.25 : +cellKm.toFixed(2));
+    const maxKm = Math.max(minKm * 8, Math.min(half, Math.max(25, cellKm * 50)));
+    const step = cellKm <= 0.5 ? 0.25 : cellKm <= 2 ? 0.5 : 1;
+    const el = $('brush');
+    if (!el) return;
+    el.min = String(+minKm.toFixed(2));
+    el.max = String(+(maxKm >= 10 ? maxKm.toFixed(0) : maxKm.toFixed(1)));
+    el.step = String(step);
+    const def = Math.min(+el.max, Math.max(+el.min, cellKm * 5)); // ~5 cells
+    if (!el.dataset.cfg) {
+      el.value = String(+def.toFixed(2));
+      el.dataset.cfg = '1';
+    } else {
+      el.value = String(Math.min(+el.max, Math.max(+el.min, +el.value)));
+    }
+  }
+  configureBrushUi();
 
   // --- UI: listy wyboru ---
   for (const [k, a] of Object.entries(AIRMASSES)) $('airmass').add(new Option(a.name, k));
@@ -3625,6 +3649,7 @@ async function init() {
     $('soilV').textContent = `${num('soil')} %`;
     $('hillsV').textContent = fmH(num('hills'));
     $('brushV').textContent = `${+nD(num('brush'), 'km', 1)} ${unitD('km')}`;
+    if ($('brushIntV')) $('brushIntV').textContent = `${num('brushInt')} %`;
     $('rangeV').textContent = `×${Math.pow(2, num('range')).toFixed(2)}`;
     $('cloudAlphaV').textContent = `${num('cloudAlpha')} %`;
     $('zsV').textContent = fmH(num('zs'));
@@ -5148,55 +5173,58 @@ async function init() {
 
     // malowanie terenu / custom world (na żywo, bez restartu)
     const pw = $('paintWhat').value;
+    const br = brushR(), bi = brushInt();
     if (sim.paint && pw === 'water') {
-      paintWater(sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign > 0);
+      paintWater(sim.paint.x, sim.paint.y, br, sim.paint.sign > 0);
     } else if (sim.paint && (pw === 'sea' || pw === 'lake' || pw === 'sst' || pw === 'soil')) {
       const w = ensureWorld();
       sim.worldOn = true;
       $('shape').value = 'world';
-      const r = num('brush') * 1000 / CFG.DX;
       if (pw === 'sst') {
         const target = num('sstBrush');
-        const R = Math.ceil(r);
+        const R = Math.ceil(br);
+        const blend = Math.min(1, 4 * realDt * bi);
         for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
           const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
           if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
-          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > r) continue;
+          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > br) continue;
           const c = jj * NXV + ii;
           if (!(w.sea[c] || w.lake[c])) continue;
           const aim = sim.paint.sign > 0 ? target : Math.max(-1.8, (Number.isFinite(w.sst[c]) ? w.sst[c] : target) - 2);
           const cur = Number.isFinite(w.sst[c]) ? w.sst[c] : aim;
-          w.sst[c] = cur + (aim - cur) * Math.min(1, 4 * realDt);
+          w.sst[c] = cur + (aim - cur) * blend;
         }
       } else if (pw === 'soil') {
         const target = num('soilBrush') / 100;
-        const R = Math.ceil(r);
+        const R = Math.ceil(br);
+        const blend = Math.min(1, 4 * realDt * bi);
         for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
           const ii = Math.floor(sim.paint.x) + di, jj = Math.floor(sim.paint.y) + dj;
           if (ii < 0 || jj < 0 || ii >= NXV || jj >= NYV) continue;
-          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > r) continue;
+          if (Math.hypot(ii + 0.5 - sim.paint.x, jj + 0.5 - sim.paint.y) > br) continue;
           const c = jj * NXV + ii;
           if (w.sea[c] || w.lake[c]) continue;
           const aim = sim.paint.sign > 0 ? target : Math.max(0, w.soil[c] - 0.15);
-          w.soil[c] = w.soil[c] + (aim - w.soil[c]) * Math.min(1, 4 * realDt);
+          w.soil[c] = w.soil[c] + (aim - w.soil[c]) * blend;
         }
         applyWorldToSim();
         if (sim.land) setSoil();
       } else {
-        paintWorld(w, pw, sim.paint.x, sim.paint.y, r, sim.paint.sign > 0 ? 1 : 0, { wrap: !CFG.OPEN, hard: true });
+        paintWorld(w, pw, sim.paint.x, sim.paint.y, br, sim.paint.sign > 0 ? 1 : 0, { wrap: !CFG.OPEN, hard: true });
         applyWorldToSim();
       }
       worldHint();
     } else if (sim.paint && pw.startsWith('veg:')) {
-      paintSurface(sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign > 0 ? +pw.slice(4) : -1);
+      paintSurface(sim.paint.x, sim.paint.y, br, sim.paint.sign > 0 ? +pw.slice(4) : -1);
       if (sim.worldOn && sim.world) {
         const veg = sim.paint.sign > 0 ? +pw.slice(4) : -1;
-        paintWorld(sim.world, 'veg', sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, veg, { wrap: !CFG.OPEN, hard: true });
+        paintWorld(sim.world, 'veg', sim.paint.x, sim.paint.y, br, veg, { wrap: !CFG.OPEN, hard: true });
       }
     } else if (sim.paint) {
-      paintBrush(sim.hv, CFGV, sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign * 600 * realDt, 8000, !CFG.OPEN);
+      const amt = sim.paint.sign * 600 * bi * realDt;
+      paintBrush(sim.hv, CFGV, sim.paint.x, sim.paint.y, br, amt, 8000, !CFG.OPEN);
       if (sim.worldOn && sim.world) {
-        paintWorld(sim.world, 'h', sim.paint.x, sim.paint.y, num('brush') * 1000 / CFG.DX, sim.paint.sign * 600 * realDt, { wrap: !CFG.OPEN });
+        paintWorld(sim.world, 'h', sim.paint.x, sim.paint.y, br, amt, { wrap: !CFG.OPEN });
         $('shape').value = 'world';
       } else $('shape').value = 'painted';
       applyTerrain();

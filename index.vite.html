@@ -657,7 +657,9 @@
           <label class="row"><input id="paint" type="checkbox" /> Paint on the map (left button: raise / add, right button: lower / remove)</label>
           <label><span class="lbl">Paint with</span><select id="paintWhat"></select></label>
           <label><span class="lbl">Brush radius <b id="brushV"></b></span>
-            <input id="brush" type="range" min="0.5" max="6" step="0.25" value="2" /></label>
+            <input id="brush" type="range" min="1" max="50" step="0.5" value="5" title="Paint radius on the map (scales with grid spacing)" /></label>
+          <label><span class="lbl">Brush intensity <b id="brushIntV">40 %</b></span>
+            <input id="brushInt" type="range" min="5" max="100" step="5" value="40" title="How fast height, SST and soil change while you paint" /></label>
           <label id="sstBrushLab" style="display:none"><span class="lbl">SST brush [°C] <b id="sstBrushV">15</b></span>
             <input id="sstBrush" type="range" min="-2" max="32" step="0.5" value="15" /></label>
           <label id="soilBrushLab" style="display:none"><span class="lbl">Soil brush <b id="soilBrushV">55 %</b></span>
