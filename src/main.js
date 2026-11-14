@@ -23,7 +23,7 @@ import { MANIP_RAIN, MANIP_VAR, fmtT, fmtX, nearest, manipQuery, seg, segAt } fr
 import { packRun, openRun, jsonPack, jsonUnpack, stashRun, stashedRun, clearStash, resumeUrl } from './runfile.js';
 import {
   QUALITY_MODES, loadQualityMode, saveQualityMode, detectGpuTierAsync, resolveQuality,
-  cgItersFor, diagIntervalMs, canvasScale, volStride, MAX_STEPS,
+  cgItersFor, diagIntervalMs, canvasScale, volStride, MAX_STEPS, pacedSteps, sfcDiagEvery,
 } from './perf.js';
 import { isGpuDropped, shaderCompilationInfo } from './gpuutil.js';
 import commonSrc from './shaders/common.wgsl?raw';
@@ -423,12 +423,18 @@ async function init() {
   const sim = {
     time: 0, step: 0, paused: false, debt: 0, msPerStep: 0, statsPending: false, lastStats: 0,
     stats: null, means: null, sfc: null, busy: true,
+    gpuGen: 0, gpuDoneGen: 0, diagN: 0, diagCopiedSfc: true,
     flat: true, seed: 1, h: new Float32Array(NXY), hv: new Float32Array(NXV * NYV), hmax: 0, startHour: 6, doy0: 172, year: 2026,
     paint: null,
     worldOn: false, world: null,   // Custom World Builder maps (h, sea, sst, soil, veg, lake)
     worldEdit: false,              // pre-start editor: presets/paint only; PE spin-up deferred until Begin weather
     probe: { i: MG + Math.floor(NXD / 2), j: MG + Math.floor(NYD / 2) },   // sonda (domyślnie środek mapy)
     probeEnc: -1, probeColAt: -1, probeCol: null,
+  };
+  const gpuBacklog = () => Math.max(0, sim.gpuGen - sim.gpuDoneGen);
+  const markGpuSubmit = () => {
+    const gen = ++sim.gpuGen;
+    device.queue.onSubmittedWorkDone().then(() => { if (gen > sim.gpuDoneGen) sim.gpuDoneGen = gen; });
   };
   let profMode = 'point';
   const speedHist = [];
@@ -1731,6 +1737,7 @@ async function init() {
       }
       const cpuT0 = performance.now();
       device.queue.submit([enc.finish()]);
+      markGpuSubmit();
       if (useTS) {
         ts.pending = true;
         ts.read.mapAsync(GPUMapMode.READ).then(() => {
@@ -1751,8 +1758,21 @@ async function init() {
   }
 
   // Diagnostyka: statystyki, średnie poziome i pola przy gruncie → jeden bufor do odczytu
+  const LIGHT_SFC = ['T2', 'CWU', 'CWV', 'MWU', 'MWV'];
+  const SFC_OFF = STATS_BYTES + 16 * NZ;
+  function wantFullSfcDiag() {
+    if (!sim.sfc) return true;
+    if (perfState.quality === 'fidelity') return true;
+    if ($('tipOn')?.checked && sim.hover) return true;
+    if (typeof curTab === 'function' && curTab() === 'mon' && document.body.classList.contains('drawer')) return true;
+    if (typeof curAna === 'function' && curAna() === 'st' && !document.body.classList.contains('noana')) return true;
+    let every = sfcDiagEvery(perfState.quality);
+    if (sim.probe) every = Math.max(2, every);
+    return (sim.diagN % every) === 0;
+  }
   function encodeDiag(enc) {
     sim.diagT = sim.time;   // chwila, z której pochodzi kopia pól (odczyt dociera później – w trybie MAX nawet godzinę symulacji)
+    sim.diagN++;
     enc.clearBuffer(statsBuf);
     const pass = enc.beginComputePass();
     const diagPipes = sim.probe ? [probePipe, statsPipe, meansPipe] : [statsPipe, meansPipe];
@@ -1765,7 +1785,16 @@ async function init() {
     enc.copyBufferToBuffer(statsBuf, 0, diagRead, 0, STATS_BYTES);
     enc.copyBufferToBuffer(workBuf, W_MEAN * 4, diagRead, STATS_BYTES, 16 * NZ);
     enc.copyBufferToBuffer(workBuf, W_MUV * 4, diagRead, MUV_OFF, 8 * NZ);
-    enc.copyBufferToBuffer(sfcBuf, 0, diagRead, STATS_BYTES + 16 * NZ, NSF * NXY * 4);
+    const fullSfc = wantFullSfcDiag();
+    sim.diagCopiedSfc = fullSfc;
+    if (fullSfc) {
+      enc.copyBufferToBuffer(sfcBuf, 0, diagRead, SFC_OFF, NSF * NXY * 4);
+    } else {
+      for (const name of LIGHT_SFC) {
+        const o = S[name] * NXY * 4;
+        enc.copyBufferToBuffer(sfcBuf, o, diagRead, SFC_OFF + o, NXY * 4);
+      }
+    }
     if (sim.probe) {
       enc.copyBufferToBuffer(workBuf, W_PROBE * 4, diagRead, PROBE_OFF, PROBE_N * 4);
       sim.probeEnc = sim.probe.j * NX + sim.probe.i;
@@ -1790,30 +1819,40 @@ async function init() {
 
   function readDiag() {
     sim.statsPending = true;
+    const fullSfc = sim.diagCopiedSfc;
     return diagRead.mapAsync(GPUMapMode.READ).then(() => {
-      const raw = diagRead.getMappedRange().slice(0);
-      diagRead.unmap();
-      const st = Array.from(new Float32Array(raw, 0, 16));
-      const keys = new Uint32Array(raw, 0, 16), tu = new Uint32Array(1), tf = new Float32Array(tu.buffer);
+      const mapped = diagRead.getMappedRange();
+      const take = (off, bytes) => mapped.slice(off, off + bytes);
+      const stRaw = take(0, STATS_BYTES);
+      const st = Array.from(new Float32Array(stRaw));
+      const keys = new Uint32Array(stRaw), tu = new Uint32Array(1), tf = new Float32Array(tu.buffer);
       const dec = (k) => { if (k === 0) return NaN; tu[0] = k & 0x80000000 ? k ^ 0x80000000 : ~k; return tf[0]; };
       for (let i = 6; i <= 10; i += 2) { st[i] = dec(keys[i]); st[i + 1] = -dec(keys[i + 1]); }
       st[14] = keys[14];
       sim.stats = st;
-      sim.means = new Float32Array(raw, STATS_BYTES, 4 * NZ);
-      sim.meanUV = new Float32Array(raw, MUV_OFF, 2 * NZ);
-      sim.sfc = new Float32Array(raw, STATS_BYTES + 16 * NZ, NSF * NXY);
+      sim.means = new Float32Array(take(STATS_BYTES, 16 * NZ));
+      sim.meanUV = new Float32Array(take(MUV_OFF, 8 * NZ));
+      if (fullSfc) {
+        sim.sfc = new Float32Array(take(SFC_OFF, NSF * NXY * 4));
+      } else if (sim.sfc) {
+        for (const name of LIGHT_SFC) {
+          const o = S[name] * NXY * 4;
+          sim.sfc.set(new Float32Array(take(SFC_OFF + o, NXY * 4)), S[name] * NXY);
+        }
+      }
       sim.sfcT = sim.diagT;
-      sim.probeCol = sim.probeEnc >= 0 ? new Float32Array(raw, PROBE_OFF, PROBE_N) : null;
+      sim.probeCol = sim.probeEnc >= 0 ? new Float32Array(take(PROBE_OFF, PROBE_N * 4)) : null;
       sim.probeColAt = sim.probeEnc;
       // stacje na szczytach: powietrze na wysokości stacji (liniowo między poziomami; poniżej pierwszego poziomu nad gruntem –
       // od wartości przy gruncie: T i Td 2 m, wiatr 10 m)
       const req = sim.stReqEnc || [], air = new Map();
-      if (req.length) {
-        const a = new Float32Array(raw, ST_AIR_OFF, ST_AIR * 12);
+      const stAirRaw = req.length ? new Float32Array(take(ST_AIR_OFF, ST_AIR * 48)) : null;
+      diagRead.unmap();
+      if (req.length && stAirRaw) {
         const lev = (k, o) => ({
-          T: (grid.data[grid.off.TC + k] + a[o]) * grid.data[grid.off.EXC + k] - 273.15,
-          Td: dewpoint(Math.max(a[o + 1], 1e-7), grid.data[grid.off.PRS + k]) - 273.15,
-          ua: 0.5 * (a[o + 2] + a[o + 3]), va: 0.5 * (a[o + 4] + a[o + 5]),
+          T: (grid.data[grid.off.TC + k] + stAirRaw[o]) * grid.data[grid.off.EXC + k] - 273.15,
+          Td: dewpoint(Math.max(stAirRaw[o + 1], 1e-7), grid.data[grid.off.PRS + k]) - 273.15,
+          ua: 0.5 * (stAirRaw[o + 2] + stAirRaw[o + 3]), va: 0.5 * (stAirRaw[o + 4] + stAirRaw[o + 5]),
         });
         const mixr = (A, B, w) => ({ T: A.T + (B.T - A.T) * w, Td: A.Td + (B.Td - A.Td) * w, ua: A.ua + (B.ua - A.ua) * w, va: A.va + (B.va - A.va) * w });
         req.forEach((q, n) => {
@@ -1862,7 +1901,9 @@ async function init() {
     const ck = clock(sim.time);
     const sun = sunVector(num('lat'), ck.doy, ck.hour);
     const cscale = canvasScale(perfState.quality, v3.on);
+    const skipAna = document.body.classList.contains('noana');
     for (const v of views) {
+      if (v.mode === 1 && skipAna) continue;          // panele analizy ukryte – bez pionowego przekroju
       if (v.mode === 0 && v3.on) {
         resizeCanvas(v.canvas, cscale);              // widok 3D w mniejszej rozdzielczości (wygładza przeglądarka)
         encode3D(enc, v);
@@ -5459,17 +5500,24 @@ async function init() {
     }
 
     const q = perfState.quality;
+    const backlog = gpuBacklog();
     let n = 0;
     if (!sim.paused) {
       const mode = $('speed').value;
       if (mode === 'max') {
-        n = MAX_STEPS;
+        n = pacedSteps(sim.msPerStep, q, v3.on, frameMsEma, backlog);
       } else {
         sim.debt += realDt * Number(mode) / DT;
         n = Math.floor(sim.debt);
         sim.debt -= n;
         if (sim.debt > 1) sim.debt = 0;
-        n = Math.max(0, Math.min(MAX_STEPS, n));
+        if (backlog >= 2) {
+          sim.debt += n;
+          n = 0;
+        } else {
+          const cap = pacedSteps(sim.msPerStep, q, v3.on, frameMsEma, backlog);
+          if (n > cap) { sim.debt += n - cap; n = cap; }
+        }
       }
     }
 
@@ -5491,6 +5539,7 @@ async function init() {
     const hidden = document.hidden;
     if (!hidden) encodeRender(enc);
     device.queue.submit([enc.finish()]);
+    markGpuSubmit();
     if (!hidden) ts3Map();
     if (wantDiag) readDiag();
     if (sim.snapReq) { sim.snapReq = false; snapshot(); }
@@ -5571,7 +5620,7 @@ async function init() {
       $('chipGpu').textContent = sim.msPerStep ? `${sim.msPerStep.toFixed(1)} ms/step` : '–';
       fitChips();
       $('perf').textContent = [
-        `quality          ${perfState.mode} → ${perfState.quality} · CG ${perfState.cg}${sim.flat ? '' : ' (terrain)'} · frame ${frameMsEma.toFixed(0)} ms`,
+        `quality          ${perfState.mode} → ${perfState.quality} · CG ${perfState.cg}${sim.flat ? '' : ' (terrain)'} · frame ${frameMsEma.toFixed(0)} ms · GPU queue ${gpuBacklog()}`,
         `GPU              ${perfState.label} (${perfState.tier}${perfState.reason ? ', ' + perfState.reason : ''})`,
         `speed            ${simPerReal.toFixed(0)}×, one day = ${isFinite(dayMin) ? dayMin.toFixed(1) + ' min' : '—'}`,
         `GPU per step     ${sim.msPerStep ? sim.msPerStep.toFixed(2) + ' ms' : '—'}${ts ? '' : ' (est.)'}${sim.flat ? '' : ' (terrain)'}`,

@@ -3,7 +3,7 @@
 
 export const QUALITY_MODES = [
   { id: 'auto', name: 'Auto', hint: 'Pick Smooth / Balanced / Fidelity from the graphics card and grid size' },
-  { id: 'smooth', name: 'Smooth', hint: 'Prioritise fluid display; fewer CG iterations, lighter diagnostics' },
+  { id: 'smooth', name: 'Smooth', hint: 'Prioritise fluid display; GPU-paced Max and lighter readbacks' },
   { id: 'balanced', name: 'Balanced', hint: 'Good default for most machines' },
   { id: 'fidelity', name: 'Fidelity', hint: 'Full solver and frequent diagnostics (best cards)' },
 ];
@@ -110,6 +110,24 @@ export const MAX_STEPS = 2048;
 
 export function maxStepsFor(_quality) {
   return MAX_STEPS;
+}
+
+/** How many solver steps to encode this frame, paced by GPU backlog and recent encode cost. */
+export function pacedSteps(msPerStep, quality, v3on, frameMsEma = 0, backlog = 0) {
+  const encCap = quality === 'fidelity' ? 512 : quality === 'balanced' ? 384 : 256;
+  if (backlog >= 2) return 0;
+  let targetMs = quality === 'smooth' ? 20 : quality === 'balanced' ? 32 : 48;
+  if (v3on) targetMs *= 0.72;
+  if (frameMsEma > 45) targetMs *= 0.5;
+  else if (frameMsEma > 30) targetMs *= 0.75;
+  if (backlog === 0 && frameMsEma < 18) targetMs *= 1.35;
+  if (!msPerStep) return Math.min(encCap, backlog === 0 ? 64 : 32);
+  return Math.max(1, Math.min(encCap, MAX_STEPS, Math.floor(targetMs / msPerStep)));
+}
+
+/** Full surface diagnostics every N reads (light fields in between). */
+export function sfcDiagEvery(quality) {
+  return quality === 'fidelity' ? 1 : quality === 'balanced' ? 2 : 3;
 }
 
 export function costFactor(tier) {
