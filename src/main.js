@@ -1900,7 +1900,7 @@ async function init() {
   function encodeRender(enc) {
     const ck = clock(sim.time);
     const sun = sunVector(num('lat'), ck.doy, ck.hour);
-    const cscale = canvasScale(perfState.quality, v3.on);
+    const cscale = canvasScale(perfState.quality, v3.on, perfState.tier);
     const skipAna = document.body.classList.contains('noana');
     for (const v of views) {
       if (v.mode === 1 && skipAna) continue;          // panele analizy ukryte – bez pionowego przekroju

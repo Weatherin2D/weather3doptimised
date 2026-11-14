@@ -97,7 +97,11 @@ export function diagIntervalMs(quality, nxy) {
   return Math.min(2000, Math.round(base * scale));
 }
 
-export function canvasScale(quality, v3on) {
+export function canvasScale(quality, v3on, tier = 'mid') {
+  if (tier === 'low' && quality !== 'fidelity') {
+    if (v3on) return quality === 'smooth' ? 0.3 : 0.35;
+    return quality === 'smooth' ? 0.5 : 0.6;
+  }
   if (v3on) return quality === 'smooth' ? 0.4 : quality === 'balanced' ? 0.5 : 0.6;
   return quality === 'smooth' ? 0.75 : quality === 'balanced' ? 0.9 : 1;
 }
